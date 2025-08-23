@@ -258,11 +258,18 @@ export interface Group {
 }
 export type Element = BaseElement | Group
 
+export interface SlideTransition {
+  type: string
+  duration: number
+  direction: string | null
+}
+
 export interface Slide {
   fill: Fill
   elements: Element[]
   layoutElements: Element[]
   note: string
+  transition?: SlideTransition | null
 }
 
 export interface Options {

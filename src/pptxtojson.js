@@ -13,6 +13,7 @@ import { getTableBorders, getTableCellParams, getTableRowParams } from './table'
 import { RATIO_EMUs_Points } from './constants'
 import { findOMath, latexFormart, parseOMath } from './math'
 import { getShapePath } from './shapePath'
+import { parseTransition, findTransitionNode } from './animation'
 
 export async function parse(file) {
   const slides = []
@@ -274,11 +275,18 @@ async function processSingleSlide(zip, sldFileName, themeContent, defaultTextSty
     }
   }
 
+  let transitionNode = findTransitionNode(slideContent, 'p:sld')
+  if (!transitionNode) transitionNode = findTransitionNode(slideLayoutContent, 'p:sldLayout')
+  if (!transitionNode) transitionNode = findTransitionNode(slideMasterContent, 'p:sldMaster')
+
+  const transition = parseTransition(transitionNode)
+
   return {
     fill,
     elements,
     layoutElements,
     note,
+    transition,
   }
 }
 
