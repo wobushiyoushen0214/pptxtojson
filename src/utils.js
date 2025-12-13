@@ -161,3 +161,7 @@ export function hasValidText(htmlString) {
   const text = doc.body.textContent || doc.body.innerText
   return text.trim() !== ''
 }
+
+export function numberToFixed(num, fractionDigits = 4) {
+  return parseFloat(num.toFixed(fractionDigits))
+}

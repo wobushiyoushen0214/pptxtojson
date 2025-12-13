@@ -7,7 +7,7 @@ import { getVerticalAlign } from './align'
 import { getPosition, getSize } from './position'
 import { genTextBody } from './text'
 import { getCustomShapePath } from './shape'
-import { extractFileExtension, base64ArrayBuffer, getTextByPathList, angleToDegrees, getMimeType, isVideoLink, escapeHtml, hasValidText } from './utils'
+import { extractFileExtension, base64ArrayBuffer, getTextByPathList, angleToDegrees, getMimeType, isVideoLink, escapeHtml, hasValidText, numberToFixed } from './utils'
 import { getShadow } from './shadow'
 import { getTableBorders, getTableCellParams, getTableRowParams } from './table'
 import { RATIO_EMUs_Points } from './constants'
@@ -516,20 +516,20 @@ async function processGroupSpNode(node, warpObj, source, parentGroupHierarchy = 
 
   return {
     type: 'group',
-    top: y,
-    left: x,
-    width: cx,
-    height: cy,
+    top: numberToFixed(y),
+    left: numberToFixed(x),
+    width: numberToFixed(cx),
+    height: numberToFixed(cy),
     rotate,
     order,
     isFlipV,
     isFlipH,
     elements: elements.map(element => ({
       ...element,
-      left: (element.left - chx) * ws,
-      top: (element.top - chy) * hs,
-      width: element.width * ws,
-      height: element.height * hs,
+      left: numberToFixed((element.left - chx) * ws),
+      top: numberToFixed((element.top - chy) * hs),
+      width: numberToFixed(element.width * ws),
+      height: numberToFixed(element.height * hs),
     }))
   }
 }

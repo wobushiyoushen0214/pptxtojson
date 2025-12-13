@@ -121,7 +121,15 @@ export function genSpanElement(node, pNode, textBodyNode, pFontStyle, slideLayou
   const shadow = getFontShadow(node, warpObj)
   const subscript = getFontSubscript(node)
 
-  if (fontColor) styleText += `color: ${fontColor};`
+  if (fontColor) {
+    if (typeof fontColor === 'string') styleText += `color: ${fontColor};`
+    else if (fontColor.colors) {
+      const { colors, rot } = fontColor
+      const stops = colors.map(item => `${item.color} ${item.pos}`).join(', ')
+      const gradientStyle = `linear-gradient(${rot}deg, ${stops})`
+      styleText += `background: ${gradientStyle}; background-clip: text; color: transparent;`
+    }
+  }
   if (fontSize) styleText += `font-size: ${fontSize};`
   if (fontType) styleText += `font-family: ${fontType};`
   if (fontBold) styleText += `font-weight: ${fontBold};`

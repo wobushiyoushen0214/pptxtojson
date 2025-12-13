@@ -1,6 +1,6 @@
 import { getTextByPathList } from './utils'
 import { getShadow } from './shadow'
-import { getFillType, getSolidFill } from './fill'
+import { getFillType, getGradientFill, getSolidFill } from './fill'
 
 export function getFontType(node, type, warpObj) {
   let typeface = getTextByPathList(node, ['a:rPr', 'a:latin', 'attrs', 'typeface'])
@@ -30,6 +30,11 @@ export function getFontColor(node, pNode, lstStyle, pFontStyle, lvl, warpObj) {
     if (filTyp === 'SOLID_FILL') {
       const solidFillNode = rPrNode['a:solidFill']
       color = getSolidFill(solidFillNode, undefined, undefined, warpObj)
+    }
+    if (filTyp === 'GRADIENT_FILL') {
+      const gradientFillNode = rPrNode['a:gradFill']
+      const gradient = getGradientFill(gradientFillNode, warpObj)
+      return gradient
     }
   }
   if (!color && getTextByPathList(lstStyle, ['a:lvl' + lvl + 'pPr', 'a:defRPr'])) {
