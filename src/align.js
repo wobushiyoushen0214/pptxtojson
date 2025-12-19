@@ -65,59 +65,35 @@ export function getVerticalAlign(node, slideLayoutSpNode, slideMasterSpNode) {
 }
 
 export function getTextAutoFit(node, slideLayoutSpNode, slideMasterSpNode) {
-  const bodyPr = getTextByPathList(node, ['p:txBody', 'a:bodyPr'])
-  let autoFitType = 'none'
+  function checkBodyPr(bodyPr) {
+    if (!bodyPr) return null
 
-  if (bodyPr) {
-    if (bodyPr['a:spAutoFit']) autoFitType = 'shape'
+    if (bodyPr['a:noAutofit']) return { result: null }
+    else if (bodyPr['a:spAutoFit']) return { result: { type: 'shape' } }
     else if (bodyPr['a:normAutofit']) {
-      autoFitType = 'text'
       const fontScale = getTextByPathList(bodyPr['a:normAutofit'], ['attrs', 'fontScale'])
       if (fontScale) {
         const scalePercent = parseInt(fontScale) / 1000
         return {
-          type: 'text',
-          fontScale: scalePercent,
-        }
-      }
-    }
-  }
-
-  if (autoFitType === 'none' && slideLayoutSpNode) {
-    const layoutBodyPr = getTextByPathList(slideLayoutSpNode, ['p:txBody', 'a:bodyPr'])
-    if (layoutBodyPr) {
-      if (layoutBodyPr['a:spAutoFit']) autoFitType = 'shape'
-      else if (layoutBodyPr['a:normAutofit']) {
-        autoFitType = 'text'
-        const fontScale = getTextByPathList(layoutBodyPr['a:normAutofit'], ['attrs', 'fontScale'])
-        if (fontScale) {
-          const scalePercent = parseInt(fontScale) / 1000
-          return {
+          result: {
             type: 'text',
             fontScale: scalePercent,
           }
         }
       }
+      return { result: { type: 'text' } }
     }
+    return null
   }
 
-  if (autoFitType === 'none' && slideMasterSpNode) {
-    const masterBodyPr = getTextByPathList(slideMasterSpNode, ['p:txBody', 'a:bodyPr'])
-    if (masterBodyPr) {
-      if (masterBodyPr['a:spAutoFit']) autoFitType = 'shape'
-      else if (masterBodyPr['a:normAutofit']) {
-        autoFitType = 'text'
-        const fontScale = getTextByPathList(masterBodyPr['a:normAutofit'], ['attrs', 'fontScale'])
-        if (fontScale) {
-          const scalePercent = parseInt(fontScale) / 1000
-          return {
-            type: 'text',
-            fontScale: scalePercent,
-          }
-        }
-      }
-    }
-  }
+  const nodeCheck = checkBodyPr(getTextByPathList(node, ['p:txBody', 'a:bodyPr']))
+  if (nodeCheck) return nodeCheck.result
 
-  return autoFitType === 'none' ? null : { type: autoFitType }
+  const layoutCheck = checkBodyPr(getTextByPathList(slideLayoutSpNode, ['p:txBody', 'a:bodyPr']))
+  if (layoutCheck) return layoutCheck.result
+
+  const masterCheck = checkBodyPr(getTextByPathList(slideMasterSpNode, ['p:txBody', 'a:bodyPr']))
+  if (masterCheck) return masterCheck.result
+
+  return null
 }
