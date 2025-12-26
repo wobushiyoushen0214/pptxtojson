@@ -1,5 +1,5 @@
 import { getHorizontalAlign } from './align'
-import { getTextByPathList } from './utils'
+import { escapeHtml, getTextByPathList } from './utils'
 
 import {
   getFontType,
@@ -24,7 +24,7 @@ export function genTextBody(textBodyNode, spNode, slideLayoutSpNode, type, warpO
   const pNode = textBodyNode['a:p']
   const pNodes = pNode.constructor === Array ? pNode : [pNode]
 
-  let isList = ''
+  let currentListState = null
 
   for (const pNode of pNodes) {
     let rNode = pNode['a:r']
@@ -52,23 +52,29 @@ export function genTextBody(textBodyNode, spNode, slideLayoutSpNode, type, warpO
 
     const align = getHorizontalAlign(pNode, spNode, type, warpObj)
 
-    const listType = getListType(pNode)
-    if (listType) {
-      if (!isList) {
-        text += `<${listType}>`
-        isList = listType
+    const listInfo = getListInfo(pNode)
+    if (listInfo) {
+      const nextKey = getListKey(listInfo)
+      if (!currentListState || currentListState.key !== nextKey) {
+        if (currentListState) text += `</${currentListState.tag}>`
+        text += `<${listInfo.tag} style="list-style: none; padding-left: 0; margin: 0;">`
+        currentListState = {
+          key: nextKey,
+          tag: listInfo.tag,
+          listInfo,
+          counter: listInfo.kind === 'autoNum' ? listInfo.startAt : null,
+        }
       }
-      else if (isList && isList !== listType) {
-        text += `</${isList}>`
-        text += `<${listType}>`
-        isList = listType
-      }
-      text += `<li style="text-align: ${align};">`
+
+      const marker = getListMarker(currentListState)
+      const bulletStyle = getListMarkerStyle(currentListState.listInfo)
+      const indent = (listInfo.lvl - 1) * 1.5
+      text += `<li style="text-align: ${align}; margin-left: ${indent}em;"><span style="${bulletStyle}">${marker}</span>`
     }
     else {
-      if (isList) {
-        text += `</${isList}>`
-        isList = ''
+      if (currentListState) {
+        text += `</${currentListState.tag}>`
+        currentListState = null
       }
       text += `<p style="text-align: ${align};">`
     }
@@ -109,20 +115,126 @@ export function genTextBody(textBodyNode, spNode, slideLayoutSpNode, type, warpO
       }
     }
 
-    if (listType) text += '</li>'
+    if (listInfo) text += '</li>'
     else text += '</p>'
   }
+  if (currentListState) text += `</${currentListState.tag}>`
   return text
 }
 
-export function getListType(node) {
+export function getListInfo(node) {
   const pPrNode = node['a:pPr']
-  if (!pPrNode) return ''
+  if (!pPrNode) return null
+  if (pPrNode['a:buNone']) return null
 
-  if (pPrNode['a:buChar']) return 'ul'
-  if (pPrNode['a:buAutoNum']) return 'ol'
-  
-  return ''
+  let lvl = 1
+  const lvlNode = getTextByPathList(pPrNode, ['attrs', 'lvl'])
+  if (lvlNode !== undefined) lvl = parseInt(lvlNode) + 1
+
+  if (pPrNode['a:buChar']) {
+    const char = getTextByPathList(pPrNode, ['a:buChar', 'attrs', 'char']) || '•'
+    const font = getTextByPathList(pPrNode, ['a:buFont', 'attrs', 'typeface']) || ''
+    return {
+      kind: 'char',
+      tag: 'ul',
+      lvl,
+      char,
+      font,
+    }
+  }
+
+  if (pPrNode['a:buAutoNum']) {
+    const autoNumNode = pPrNode['a:buAutoNum']
+    const numType = getTextByPathList(autoNumNode, ['attrs', 'type']) || 'arabicPeriod'
+    const startAtRaw = getTextByPathList(autoNumNode, ['attrs', 'startAt'])
+    const startAt = startAtRaw ? parseInt(startAtRaw) : 1
+    const font = getTextByPathList(pPrNode, ['a:buFont', 'attrs', 'typeface']) || ''
+    return {
+      kind: 'autoNum',
+      tag: 'ol',
+      lvl,
+      numType,
+      startAt: isNaN(startAt) ? 1 : startAt,
+      font,
+    }
+  }
+
+  return null
+}
+
+function getListKey(listInfo) {
+  if (!listInfo) return ''
+  if (listInfo.kind === 'autoNum') return `${listInfo.tag}:${listInfo.kind}:${listInfo.numType}:${listInfo.startAt}:${listInfo.lvl}:${listInfo.font}`
+  return `${listInfo.tag}:${listInfo.kind}:${listInfo.char}:${listInfo.lvl}:${listInfo.font}`
+}
+
+function getListMarkerStyle(listInfo) {
+  let style = 'display: inline-block; min-width: 1.4em; margin-right: 0.4em;'
+  if (listInfo.font) style += `font-family: ${listInfo.font};`
+  return style
+}
+
+function getListMarker(listState) {
+  const listInfo = listState.listInfo
+  if (listInfo.kind === 'char') return escapeHtml(listInfo.char)
+
+  const n = listState.counter
+  listState.counter += 1
+  return escapeHtml(formatAutoNumber(n, listInfo.numType))
+}
+
+function formatAutoNumber(n, numType) {
+  const suffix = numType.includes('ParenR') ? ')' : (numType.includes('Period') ? '.' : '')
+  const bothParen = numType.includes('ParenBoth')
+
+  let core
+  if (numType.includes('alphaLc')) core = toAlpha(n, false)
+  else if (numType.includes('alphaUc')) core = toAlpha(n, true)
+  else if (numType.includes('romanLc')) core = toRoman(n, false)
+  else if (numType.includes('romanUc')) core = toRoman(n, true)
+  else core = String(n)
+
+  if (bothParen) return `(${core})`
+  return `${core}${suffix || '.'}`
+}
+
+function toAlpha(n, upper) {
+  let num = n
+  let s = ''
+  while (num > 0) {
+    num -= 1
+    s = String.fromCharCode((num % 26) + 65) + s
+    num = Math.floor(num / 26)
+  }
+  return upper ? s : s.toLowerCase()
+}
+
+function toRoman(n, upper) {
+  const num = Math.max(1, Math.min(3999, n))
+  const map = [
+    [1000, 'M'],
+    [900, 'CM'],
+    [500, 'D'],
+    [400, 'CD'],
+    [100, 'C'],
+    [90, 'XC'],
+    [50, 'L'],
+    [40, 'XL'],
+    [10, 'X'],
+    [9, 'IX'],
+    [5, 'V'],
+    [4, 'IV'],
+    [1, 'I'],
+  ]
+  let r = ''
+  let v = num
+  for (const [value, sym] of map) {
+    while (v >= value) {
+      r += sym
+      v -= value
+    }
+  }
+  return upper ? r : r.toLowerCase()
 }
 
 export function genSpanElement(node, pNode, textBodyNode, pFontStyle, slideLayoutSpNode, type, warpObj) {
@@ -150,7 +262,7 @@ export function getSpanStyleInfo(node, pNode, textBodyNode, pFontStyle, slideLay
 
   let styleText = ''
   const fontColor = getFontColor(node, pNode, lstStyle, pFontStyle, lvl, warpObj)
-  const fontSize = getFontSize(node, slideLayoutSpNode, type, slideMasterTextStyles, textBodyNode, pNode)
+  const fontSize = getFontSize(node, slideLayoutSpNode, type, slideMasterTextStyles, warpObj['defaultTextStyle'], textBodyNode, pNode)
   const fontType = getFontType(node, type, warpObj)
   const fontBold = getFontBold(node)
   const fontItalic = getFontItalic(node)

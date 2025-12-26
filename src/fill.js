@@ -649,7 +649,8 @@ export async function getShapeFill(node, pNode, isSvgMode, warpObj, source, grou
 }
 
 async function findFillInGroupHierarchy(groupHierarchy, warpObj, source) {
-  for (const groupNode of groupHierarchy) {
+  for (let i = groupHierarchy.length - 1; i >= 0; i--) {
+    const groupNode = groupHierarchy[i]
     if (!groupNode || !groupNode['p:grpSpPr']) continue
 
     const grpSpPr = groupNode['p:grpSpPr']

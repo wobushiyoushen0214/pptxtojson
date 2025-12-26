@@ -3,20 +3,32 @@ import { getShadow } from './shadow'
 import { getFillType, getGradientFill, getSolidFill } from './fill'
 
 export function getFontType(node, type, warpObj) {
-  let typeface = getTextByPathList(node, ['a:rPr', 'a:latin', 'attrs', 'typeface'])
+  const text = getTextByPathList(node, ['a:t'])
+  const preferEa = typeof text === 'string' && /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]/.test(text)
+
+  let typeface =
+    (preferEa ? getTextByPathList(node, ['a:rPr', 'a:ea', 'attrs', 'typeface']) : null) ||
+    getTextByPathList(node, ['a:rPr', 'a:latin', 'attrs', 'typeface']) ||
+    getTextByPathList(node, ['a:rPr', 'a:ea', 'attrs', 'typeface']) ||
+    getTextByPathList(node, ['a:rPr', 'a:cs', 'attrs', 'typeface'])
 
   if (!typeface) {
     const fontSchemeNode = getTextByPathList(warpObj['themeContent'], ['a:theme', 'a:themeElements', 'a:fontScheme'])
 
+    let fontNode
+
     if (type === 'title' || type === 'subTitle' || type === 'ctrTitle') {
-      typeface = getTextByPathList(fontSchemeNode, ['a:majorFont', 'a:latin', 'attrs', 'typeface'])
-    } 
-    else if (type === 'body') {
-      typeface = getTextByPathList(fontSchemeNode, ['a:minorFont', 'a:latin', 'attrs', 'typeface'])
-    } 
-    else {
-      typeface = getTextByPathList(fontSchemeNode, ['a:minorFont', 'a:latin', 'attrs', 'typeface'])
+      fontNode = getTextByPathList(fontSchemeNode, ['a:majorFont'])
     }
+    else {
+      fontNode = getTextByPathList(fontSchemeNode, ['a:minorFont'])
+    }
+
+    typeface =
+      (preferEa ? getTextByPathList(fontNode, ['a:ea', 'attrs', 'typeface']) : null) ||
+      getTextByPathList(fontNode, ['a:latin', 'attrs', 'typeface']) ||
+      getTextByPathList(fontNode, ['a:ea', 'attrs', 'typeface']) ||
+      getTextByPathList(fontNode, ['a:cs', 'attrs', 'typeface'])
   }
 
   return typeface || ''
@@ -53,8 +65,14 @@ export function getFontColor(node, pNode, lstStyle, pFontStyle, lvl, warpObj) {
   return color || ''
 }
 
-export function getFontSize(node, slideLayoutSpNode, type, slideMasterTextStyles, textBodyNode, pNode) {
+export function getFontSize(node, slideLayoutSpNode, type, slideMasterTextStyles, defaultTextStyle, textBodyNode, pNode) {
   let fontSize
+
+  let lvl = 1
+  if (pNode) {
+    const lvlNode = getTextByPathList(pNode, ['a:pPr', 'attrs', 'lvl'])
+    if (lvlNode !== undefined) lvl = parseInt(lvlNode) + 1
+  }
 
   if (getTextByPathList(node, ['a:rPr', 'attrs', 'sz'])) fontSize = getTextByPathList(node, ['a:rPr', 'attrs', 'sz']) / 100
 
@@ -67,30 +85,19 @@ export function getFontSize(node, slideLayoutSpNode, type, slideMasterTextStyles
   if ((isNaN(fontSize) || !fontSize) && textBodyNode) {
     const lstStyle = getTextByPathList(textBodyNode, ['a:lstStyle'])
     if (lstStyle) {
-      let lvl = 1
-      if (pNode) {
-        const lvlNode = getTextByPathList(pNode, ['a:pPr', 'attrs', 'lvl'])
-        if (lvlNode !== undefined) lvl = parseInt(lvlNode) + 1
-      }
-
       const sz = getTextByPathList(lstStyle, [`a:lvl${lvl}pPr`, 'a:defRPr', 'attrs', 'sz'])
       if (sz) fontSize = parseInt(sz) / 100
     }
   }
 
-  if ((isNaN(fontSize) || !fontSize)) {
-    const sz = getTextByPathList(slideLayoutSpNode, ['p:txBody', 'a:lstStyle', 'a:lvl1pPr', 'a:defRPr', 'attrs', 'sz'])
-    if (sz) fontSize = parseInt(sz) / 100
+  if ((isNaN(fontSize) || !fontSize) && slideLayoutSpNode) {
+    const layoutSz = getTextByPathList(slideLayoutSpNode, ['p:txBody', 'a:lstStyle', `a:lvl${lvl}pPr`, 'a:defRPr', 'attrs', 'sz'])
+    if (layoutSz) fontSize = parseInt(layoutSz) / 100
   }
 
   if ((isNaN(fontSize) || !fontSize) && slideLayoutSpNode) {
-    let lvl = 1
-    if (pNode) {
-      const lvlNode = getTextByPathList(pNode, ['a:pPr', 'attrs', 'lvl'])
-      if (lvlNode !== undefined) lvl = parseInt(lvlNode) + 1
-    }
-    const layoutSz = getTextByPathList(slideLayoutSpNode, ['p:txBody', 'a:lstStyle', `a:lvl${lvl}pPr`, 'a:defRPr', 'attrs', 'sz'])
-    if (layoutSz) fontSize = parseInt(layoutSz) / 100
+    const sz = getTextByPathList(slideLayoutSpNode, ['p:txBody', 'a:lstStyle', 'a:lvl1pPr', 'a:defRPr', 'attrs', 'sz'])
+    if (sz) fontSize = parseInt(sz) / 100
   }
 
   if ((isNaN(fontSize) || !fontSize) && pNode) {
@@ -99,28 +106,52 @@ export function getFontSize(node, slideLayoutSpNode, type, slideMasterTextStyles
   }
 
   if (isNaN(fontSize) || !fontSize) {
-    let sz
-    if (type === 'title' || type === 'subTitle' || type === 'ctrTitle') {
-      sz = getTextByPathList(slideMasterTextStyles, ['p:titleStyle', 'a:lvl1pPr', 'a:defRPr', 'attrs', 'sz'])
-    } 
-    else if (type === 'body') {
-      sz = getTextByPathList(slideMasterTextStyles, ['p:bodyStyle', 'a:lvl1pPr', 'a:defRPr', 'attrs', 'sz'])
-    } 
-    else if (type === 'dt' || type === 'sldNum') {
-      sz = '1200'
-    } 
-    else if (!type) {
-      sz = getTextByPathList(slideMasterTextStyles, ['p:otherStyle', 'a:lvl1pPr', 'a:defRPr', 'attrs', 'sz'])
+    if (type === 'dt' || type === 'sldNum') {
+      fontSize = 12
     }
-    if (sz) fontSize = parseInt(sz) / 100
+    else {
+      const lvlKey = `a:lvl${lvl}pPr`
+
+      const tryGetMasterSz = (styleKey) => {
+        const masterSz = getTextByPathList(slideMasterTextStyles, [styleKey, lvlKey, 'a:defRPr', 'attrs', 'sz'])
+        if (masterSz) return parseInt(masterSz) / 100
+
+        const masterLvl1Sz = getTextByPathList(slideMasterTextStyles, [styleKey, 'a:lvl1pPr', 'a:defRPr', 'attrs', 'sz'])
+        if (masterLvl1Sz) return parseInt(masterLvl1Sz) / 100
+
+        return null
+      }
+
+      let resolved
+      if (type === 'title' || type === 'ctrTitle') {
+        resolved = tryGetMasterSz('p:titleStyle')
+      }
+      else if (type === 'subTitle') {
+        resolved = tryGetMasterSz('p:titleStyle')
+        if (resolved === null) resolved = tryGetMasterSz('p:bodyStyle')
+      }
+      else if (type === 'body') {
+        resolved = tryGetMasterSz('p:bodyStyle')
+      }
+      else {
+        resolved = tryGetMasterSz('p:otherStyle')
+      }
+
+      if (resolved !== null) fontSize = resolved
+    }
   }
 
-  const baseline = getTextByPathList(node, ['a:rPr', 'attrs', 'baseline'])
-  if (baseline && !isNaN(fontSize)) fontSize -= 10
+  if (isNaN(fontSize) || !fontSize) {
+    const lvlKey = `a:lvl${lvl}pPr`
+    const defaultSz =
+      getTextByPathList(defaultTextStyle, [lvlKey, 'a:defRPr', 'attrs', 'sz']) ||
+      getTextByPathList(defaultTextStyle, ['a:defPPr', 'a:defRPr', 'attrs', 'sz'])
+    if (defaultSz) fontSize = parseInt(defaultSz) / 100
+  }
 
   fontSize = (isNaN(fontSize) || !fontSize) ? 18 : fontSize
 
-  return fontSize + 'pt'
+  return fontSize + 'px'
 }
 
 export function getFontBold(node) {

@@ -2,8 +2,18 @@ import tinycolor from 'tinycolor2'
 import { getSchemeColorFromTheme } from './schemeColor'
 import { getTextByPathList } from './utils'
 
-export function getBorder(node, elType, warpObj) {
+export function getBorder(node, elType, warpObj, groupHierarchy = []) {
   let lineNode = getTextByPathList(node, ['p:spPr', 'a:ln'])
+  const isGroupLine = !!getTextByPathList(lineNode, ['a:grpFill'])
+  if ((!lineNode || isGroupLine) && groupHierarchy && groupHierarchy.length) {
+    for (let i = groupHierarchy.length - 1; i >= 0; i--) {
+      const grpLineNode = getTextByPathList(groupHierarchy[i], ['p:grpSpPr', 'a:ln'])
+      if (grpLineNode) {
+        lineNode = grpLineNode
+        break
+      }
+    }
+  }
   if (!lineNode) {
     const lnRefNode = getTextByPathList(node, ['p:style', 'a:lnRef'])
     if (lnRefNode) {
