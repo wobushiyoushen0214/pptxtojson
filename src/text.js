@@ -122,7 +122,6 @@ export function genTextBody(textBodyNode, spNode, slideLayoutSpNode, type, warpO
   return text
 }
 
-export function getListInfo(node) {
 export function getListInfo(node, textBodyNode, slideLayoutSpNode, type, warpObj) {
   const pPrNode = node['a:pPr']
   if (!pPrNode) return null
