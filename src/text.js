@@ -52,7 +52,7 @@ export function genTextBody(textBodyNode, spNode, slideLayoutSpNode, type, warpO
 
     const align = getHorizontalAlign(pNode, spNode, type, warpObj)
 
-    const listInfo = getListInfo(pNode)
+    const listInfo = getListInfo(pNode, textBodyNode, slideLayoutSpNode, type, warpObj)
     if (listInfo) {
       const nextKey = getListKey(listInfo)
       if (!currentListState || currentListState.key !== nextKey) {
@@ -123,6 +123,7 @@ export function genTextBody(textBodyNode, spNode, slideLayoutSpNode, type, warpO
 }
 
 export function getListInfo(node) {
+export function getListInfo(node, textBodyNode, slideLayoutSpNode, type, warpObj) {
   const pPrNode = node['a:pPr']
   if (!pPrNode) return null
   if (pPrNode['a:buNone']) return null
@@ -131,28 +132,61 @@ export function getListInfo(node) {
   const lvlNode = getTextByPathList(pPrNode, ['attrs', 'lvl'])
   if (lvlNode !== undefined) lvl = parseInt(lvlNode) + 1
 
-  if (pPrNode['a:buChar']) {
-    const char = getTextByPathList(pPrNode, ['a:buChar', 'attrs', 'char']) || '•'
-    const font = getTextByPathList(pPrNode, ['a:buFont', 'attrs', 'typeface']) || ''
+  const direct = extractListDefFromPPrLike(pPrNode)
+  if (direct) return { ...direct, lvl }
+
+  const fromTextBody = extractListDefFromPPrLike(getTextByPathList(textBodyNode, ['a:lstStyle', `a:lvl${lvl}pPr`]))
+  if (fromTextBody) return { ...fromTextBody, lvl }
+
+  const fromLayout = extractListDefFromPPrLike(getTextByPathList(slideLayoutSpNode, ['p:txBody', 'a:lstStyle', `a:lvl${lvl}pPr`]))
+  if (fromLayout) return { ...fromLayout, lvl }
+
+  const slideMasterTextStyles = warpObj && warpObj['slideMasterTextStyles']
+  if (slideMasterTextStyles) {
+    const styleKey = resolveMasterStyleKey(type, slideMasterTextStyles)
+    if (styleKey) {
+      const fromMaster = extractListDefFromPPrLike(getTextByPathList(slideMasterTextStyles, [styleKey, `a:lvl${lvl}pPr`]))
+      if (fromMaster) return { ...fromMaster, lvl }
+      const fromMasterLvl1 = extractListDefFromPPrLike(getTextByPathList(slideMasterTextStyles, [styleKey, 'a:lvl1pPr']))
+      if (fromMasterLvl1) return { ...fromMasterLvl1, lvl }
+    }
+  }
+
+  return null
+}
+
+function resolveMasterStyleKey(type, slideMasterTextStyles) {
+  if (!slideMasterTextStyles) return null
+  if (type === 'title' || type === 'ctrTitle') return 'p:titleStyle'
+  if (type === 'subTitle') return slideMasterTextStyles['p:titleStyle'] ? 'p:titleStyle' : 'p:bodyStyle'
+  if (type === 'body') return 'p:bodyStyle'
+  return 'p:otherStyle'
+}
+
+function extractListDefFromPPrLike(pPrLikeNode) {
+  if (!pPrLikeNode) return null
+  if (pPrLikeNode['a:buNone']) return null
+
+  if (pPrLikeNode['a:buChar']) {
+    const char = getTextByPathList(pPrLikeNode, ['a:buChar', 'attrs', 'char']) || '•'
+    const font = getTextByPathList(pPrLikeNode, ['a:buFont', 'attrs', 'typeface']) || ''
     return {
       kind: 'char',
       tag: 'ul',
-      lvl,
       char,
       font,
     }
   }
 
-  if (pPrNode['a:buAutoNum']) {
-    const autoNumNode = pPrNode['a:buAutoNum']
+  if (pPrLikeNode['a:buAutoNum']) {
+    const autoNumNode = pPrLikeNode['a:buAutoNum']
     const numType = getTextByPathList(autoNumNode, ['attrs', 'type']) || 'arabicPeriod'
     const startAtRaw = getTextByPathList(autoNumNode, ['attrs', 'startAt'])
     const startAt = startAtRaw ? parseInt(startAtRaw) : 1
-    const font = getTextByPathList(pPrNode, ['a:buFont', 'attrs', 'typeface']) || ''
+    const font = getTextByPathList(pPrLikeNode, ['a:buFont', 'attrs', 'typeface']) || ''
     return {
       kind: 'autoNum',
       tag: 'ol',
-      lvl,
       numType,
       startAt: isNaN(startAt) ? 1 : startAt,
       font,
@@ -184,8 +218,15 @@ function getListMarker(listState) {
 }
 
 function formatAutoNumber(n, numType) {
-  const suffix = numType.includes('ParenR') ? ')' : (numType.includes('Period') ? '.' : '')
+  if (/circle/i.test(numType)) return toCircledNumber(n)
+
   const bothParen = numType.includes('ParenBoth')
+  let suffix = ''
+  if (!bothParen) {
+    if (numType.includes('ParenR')) suffix = ')'
+    else if (numType.includes('Period')) suffix = '.'
+    else if (numType.includes('Comma')) suffix = ','
+  }
 
   let core
   if (numType.includes('alphaLc')) core = toAlpha(n, false)
@@ -195,7 +236,16 @@ function formatAutoNumber(n, numType) {
   else core = String(n)
 
   if (bothParen) return `(${core})`
-  return `${core}${suffix || '.'}`
+  return `${core}${suffix}`
+}
+
+function toCircledNumber(n) {
+  const num = parseInt(n)
+  if (isNaN(num) || num <= 0) return String(n)
+  if (num >= 1 && num <= 20) return String.fromCharCode(0x2460 + (num - 1))
+  if (num >= 21 && num <= 35) return String.fromCharCode(0x3251 + (num - 21))
+  if (num >= 36 && num <= 50) return String.fromCharCode(0x32B1 + (num - 36))
+  return String(num)
 }
 
 function toAlpha(n, upper) {
