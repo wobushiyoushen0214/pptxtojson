@@ -74,5 +74,13 @@ module.exports = {
         jest: true,
       },
     },
+    {
+      files: [
+        'src/pptxtojson.js',
+      ],
+      rules: {
+        'max-lines': 'off',
+      },
+    },
   ],
 }

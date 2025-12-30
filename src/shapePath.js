@@ -3,32 +3,63 @@
 import { RATIO_EMUs_Points } from './constants'
 import { getTextByPathList } from './utils'
 
+function pointOnEllipse(cx, cy, rx, ry, angleRad) {
+  return {
+    x: cx + Math.cos(angleRad) * rx,
+    y: cy + Math.sin(angleRad) * ry,
+  }
+}
+
+function buildArcChordPath(cx, cy, rx, ry, startRad, endRad, reverse) {
+  const startPoint = pointOnEllipse(cx, cy, rx, ry, startRad)
+  const endPoint = pointOnEllipse(cx, cy, rx, ry, endRad)
+
+  const from = reverse ? endPoint : startPoint
+  const to = reverse ? startPoint : endPoint
+  const delta = reverse ? (startRad - endRad) : (endRad - startRad)
+
+  const largeArc = Math.abs(delta) > Math.PI ? 1 : 0
+  const sweepFlag = delta >= 0 ? 1 : 0
+
+  return `M ${from.x},${from.y} A ${rx},${ry} 0 ${largeArc},${sweepFlag} ${to.x},${to.y} Z`
+}
+
 function shapePie(H, w, adj1, adj2, isClose) {
-  const pieVal = parseInt(adj2)
-  const piAngle = parseInt(adj1)
-  const size = parseInt(H)
-  const radius = size / 2
-
-  let value = pieVal - piAngle
-  if (value < 0) value = 360 + value
-  value = Math.min(Math.max(value, 0), 360)
-
-  const x = Math.cos((2 * Math.PI) / (360 / value))
-  const y = Math.sin((2 * Math.PI) / (360 / value))
-
-  let longArc, d
-  if (isClose) {
-    longArc = (value <= 180) ? 0 : 1
-    d = `M${radius},${radius} L${radius},0 A${radius},${radius} 0 ${longArc},1 ${radius + y * radius},${radius - x * radius} z`
-  } 
-  else {
-    longArc = (value <= 180) ? 0 : 1
-    const radius1 = radius
-    const radius2 = w / 2
-    d = `M${radius1},0 A${radius2},${radius1} 0 ${longArc},1 ${radius2 + y * radius2},${radius1 - x * radius1}`
+  const normalizeAngle = (a) => {
+    const n = Number(a)
+    if (!Number.isFinite(n)) return 0
+    let r = n % 360
+    if (r < 0) r += 360
+    return r
   }
 
-  return d
+  const start = normalizeAngle(adj1)
+  const end = normalizeAngle(adj2)
+
+  let sweep = end - start
+  if (sweep < 0) sweep += 360
+  sweep = Math.min(Math.max(sweep, 0), 360)
+
+  const size = Number(H)
+  const rx = Number(w) / 2
+  const ry = size / 2
+  const cx = rx
+  const cy = ry
+
+  const toRad = (deg) => deg * (Math.PI / 180)
+
+  const x1 = cx + Math.cos(toRad(start)) * rx
+  const y1 = cy + Math.sin(toRad(start)) * ry
+  const x2 = cx + Math.cos(toRad(end)) * rx
+  const y2 = cy + Math.sin(toRad(end)) * ry
+
+  const longArc = sweep > 180 ? 1 : 0
+  const sweepFlag = 1
+
+  if (isClose) {
+    return `M${cx},${cy} L${x1},${y1} A${rx},${ry} 0 ${longArc},${sweepFlag} ${x2},${y2} Z`
+  }
+  return `M${x1},${y1} A${rx},${ry} 0 ${longArc},${sweepFlag} ${x2},${y2}`
 }
 function shapeGear(h, points) {
   const innerRadius = h
@@ -122,8 +153,58 @@ function shapeSnipRoundRect(w, h, adj1, adj2, shapeType, adjType) {
   }
 
   if (shapeType === 'round') {
-    return `M0,${h / 2 + (1 - adjB) * (h / 2)} Q0,${h} ${adjB * (w / 2)},${h} L${w / 2 + (1 - adjC) * (w / 2)},${h} Q${w},${h} ${w},${h / 2 + (h / 2) * (1 - adjC)} L${w},${(h / 2) * adjD} Q${w},0 ${w / 2 + (w / 2) * (1 - adjD)},0 L${(w / 2) * adjA},0 Q0,0 0,${(h / 2) * (adjA)} z`
-  } 
+    if (!w || !h) return ''
+
+    const clamp01 = (v) => {
+      const n = Number(v)
+      if (!Number.isFinite(n)) return 0
+      return Math.max(0, Math.min(1, n))
+    }
+
+    const minSide = Math.min(w, h)
+
+    let rTL = clamp01(adjA) * (minSide / 2)
+    let rTR = clamp01(adjD) * (minSide / 2)
+    let rBR = clamp01(adjC) * (minSide / 2)
+    let rBL = clamp01(adjB) * (minSide / 2)
+
+    const sx1 = (rTL + rTR) > 0 ? (w / (rTL + rTR)) : 1
+    const sx2 = (rBL + rBR) > 0 ? (w / (rBL + rBR)) : 1
+    const sy1 = (rTL + rBL) > 0 ? (h / (rTL + rBL)) : 1
+    const sy2 = (rTR + rBR) > 0 ? (h / (rTR + rBR)) : 1
+    const scale = Math.min(1, sx1, sx2, sy1, sy2)
+
+    rTL *= scale
+    rTR *= scale
+    rBR *= scale
+    rBL *= scale
+
+    const moveTo = (x, y) => `M${x},${y}`
+    const lineTo = (x, y) => `L${x},${y}`
+    const arcTo = (r, x, y) => `A${r},${r} 0 0,1 ${x},${y}`
+
+    let d = ''
+    d += moveTo(rTL, 0)
+
+    d += lineTo(w - rTR, 0)
+    if (rTR > 0) d += arcTo(rTR, w, rTR)
+    else d += lineTo(w, 0)
+
+    d += lineTo(w, h - rBR)
+    if (rBR > 0) d += arcTo(rBR, w - rBR, h)
+    else d += lineTo(w, h)
+
+    d += lineTo(rBL, h)
+    if (rBL > 0) d += arcTo(rBL, 0, h - rBL)
+    else d += lineTo(0, h)
+
+    d += lineTo(0, rTL)
+    if (rTL > 0) d += arcTo(rTL, rTL, 0)
+    else d += lineTo(0, 0)
+
+    d += 'Z'
+    return d
+  }
   else if (shapeType === 'snip') {
     return `M0,${adjA * (h / 2)} L0,${h / 2 + (h / 2) * (1 - adjB)} L${adjB * (w / 2)},${h} L${w / 2 + (w / 2) * (1 - adjC)},${h} L${w},${h / 2 + (h / 2) * (1 - adjC)} L${w},${adjD * (h / 2)} L${w / 2 + (w / 2) * (1 - adjD)},0 L${(w / 2) * adjA},0 z`
   }
@@ -1520,7 +1601,7 @@ export function getShapePath(shapType, w, h, node) {
         const iwd2 = w / 2 - dr
         const ihd2 = h / 2 - dr
         const outerPath = `M ${w / 2 - w / 2},${h / 2} A ${w / 2},${h / 2} 0 1,0 ${w / 2 + w / 2},${h / 2} A ${w / 2},${h / 2} 0 1,0 ${w / 2 - w / 2},${h / 2} Z`
-        const innerPath = `M ${w / 2 + iwd2},${h / 2} A ${iwd2},${ihd2} 0 1,0 ${w / 2 - iwd2},${h / 2} A ${iwd2},${ihd2} 0 1,0 ${w / 2 + iwd2},${h / 2} Z`
+        const innerPath = `M ${w / 2 + iwd2},${h / 2} A ${iwd2},${ihd2} 0 1,1 ${w / 2 - iwd2},${h / 2} A ${iwd2},${ihd2} 0 1,1 ${w / 2 + iwd2},${h / 2} Z`
         pathData = `${outerPath} ${innerPath}`
       }
       break
@@ -1547,23 +1628,16 @@ export function getShapePath(shapType, w, h, node) {
         const swAng = -Math.PI + (dang * 2)
         const stAng1 = ang - dang
         const stAng2 = stAng1 - Math.PI
-        const ct1 = ihd2 * Math.cos(stAng1)
-        const st1 = iwd2 * Math.sin(stAng1)
-        const m1 = Math.sqrt(ct1 * ct1 + st1 * st1)
-        const n1 = iwd2 * ihd2 / m1
-        const dx1 = n1 * Math.cos(stAng1)
-        const dy1 = n1 * Math.sin(stAng1)
-        const x1 = w / 2 + dx1
-        const y1 = h / 2 + dy1
-        const x2 = w / 2 - dx1
-        const y2 = h / 2 - dy1
-        const stAng1deg = stAng1 * 180 / Math.PI
-        const stAng2deg = stAng2 * 180 / Math.PI
-        const swAng2deg = swAng * 180 / Math.PI
+
         const outerCircle = `M ${w / 2 - w / 2},${h / 2} A ${w / 2},${h / 2} 0 1,0 ${w / 2 + w / 2},${h / 2} A ${w / 2},${h / 2} 0 1,0 ${w / 2 - w / 2},${h / 2} Z`
-        const slash1 = `M ${x1},${y1} ${shapeArc(w / 2, h / 2, iwd2, ihd2, stAng1deg, (stAng1deg + swAng2deg), false).replace('M', 'L')} z`
-        const slash2 = `M ${x2},${y2} ${shapeArc(w / 2, h / 2, iwd2, ihd2, stAng2deg, (stAng2deg + swAng2deg), false).replace('M', 'L')} z`
-        pathData = `${outerCircle} ${slash1} ${slash2}`
+
+        const cx = w / 2
+        const cy = h / 2
+
+        const hole1 = buildArcChordPath(cx, cy, iwd2, ihd2, stAng1, stAng1 + swAng, true)
+        const hole2 = buildArcChordPath(cx, cy, iwd2, ihd2, stAng2, stAng2 + swAng, true)
+
+        pathData = `${outerCircle} ${hole1} ${hole2}`
       }
       break
     case 'halfFrame':

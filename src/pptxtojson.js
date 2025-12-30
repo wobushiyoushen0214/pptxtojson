@@ -114,11 +114,29 @@ function filterElementsTree(elements, slideHeight) {
   return out
 }
 
+function renumberSiblingOrder(elements) {
+  if (!Array.isArray(elements)) return elements
+
+  for (let i = 0; i < elements.length; i++) {
+    const el = elements[i]
+    if (!el || typeof el !== 'object') continue
+    el.order = i
+    if (Array.isArray(el.elements)) renumberSiblingOrder(el.elements)
+  }
+
+  return elements
+}
+
 function filterSlideOutput(slide, slideHeight) {
+  const elements = filterElementsTree(slide.elements, slideHeight)
+  const layoutElements = filterElementsTree(slide.layoutElements, slideHeight)
+  renumberSiblingOrder(elements)
+  renumberSiblingOrder(layoutElements)
+
   return {
     ...slide,
-    elements: filterElementsTree(slide.elements, slideHeight),
-    layoutElements: filterElementsTree(slide.layoutElements, slideHeight),
+    elements,
+    layoutElements,
   }
 }
 
@@ -972,6 +990,50 @@ function scaleElementTree(element, ws, hs) {
   return next
 }
 
+function applyGroupFlipToChildren(children, groupWidth, groupHeight, flipH, flipV) {
+  if (!Array.isArray(children) || (!flipH && !flipV)) return children
+
+  const gw = Number(groupWidth)
+  const gh = Number(groupHeight)
+  if (!Number.isFinite(gw) || !Number.isFinite(gh)) return children
+
+  for (const child of children) {
+    if (!child || typeof child !== 'object') continue
+
+    const cw = typeof child.width === 'number' ? child.width : 0
+    const ch = typeof child.height === 'number' ? child.height : 0
+
+    if (flipH && typeof child.left === 'number') {
+      child.left = numberToFixed(gw - child.left - cw)
+    }
+    if (flipV && typeof child.top === 'number') {
+      child.top = numberToFixed(gh - child.top - ch)
+    }
+
+    const hasTextContent = typeof child.content === 'string' && hasValidText(child.content)
+
+    if (child.type === 'text' || hasTextContent) {
+      child.isFlipH = false
+      child.isFlipV = false
+    }
+    else if (child.type === 'group' && Array.isArray(child.elements)) {
+      applyGroupFlipToChildren(child.elements, child.width, child.height, flipH, flipV)
+      child.isFlipH = false
+      child.isFlipV = false
+    }
+    else {
+      if (flipH) child.isFlipH = !child.isFlipH
+      if (flipV) child.isFlipV = !child.isFlipV
+      if ((flipH ? 1 : 0) ^ (flipV ? 1 : 0)) {
+        if (typeof child.rotate === 'number') child.rotate = numberToFixed(-child.rotate)
+      }
+    }
+  }
+
+  sortElementsByOrder(children)
+  return children
+}
+
 function scaleContentFont(html, scale) {
   if (scale === 1 || !html) return html
   return html.replace(/(font-size:\s*)([\d.]+)pt/g, (match, prefix, size) => {
@@ -1049,6 +1111,15 @@ function scaleSvgPathData(d, ws, hs) {
   }
 
   return out.join(' ')
+}
+
+function getFirstDefinedXfrmAttr(xfrmNodes, attrName) {
+  for (const node of xfrmNodes || []) {
+    if (!node) continue
+    const v = getTextByPathList(node, ['attrs', attrName])
+    if (v !== undefined && v !== null) return v
+  }
+  return undefined
 }
 
 function indexNodes(content) {
@@ -1368,6 +1439,8 @@ async function processGroupSpNode(node, warpObj, source, parentGroupHierarchy = 
 
   sortElementsByOrder(normalizedChildren)
 
+  applyGroupFlipToChildren(normalizedChildren, outWidth, outHeight, isFlipH, isFlipV)
+
   pushTrace(warpObj, 'group/end', {
     slideNo: warpObj && warpObj.slideNo,
     source,
@@ -1385,8 +1458,8 @@ async function processGroupSpNode(node, warpObj, source, parentGroupHierarchy = 
     height: outHeight,
     rotate,
     order,
-    isFlipV,
-    isFlipH,
+    isFlipV: false,
+    isFlipH: false,
     elements: normalizedChildren,
   }
 }
@@ -1458,24 +1531,26 @@ async function genShape(node, pNode, slideLayoutSpNode, slideMasterSpNode, name,
   const { top, left } = getPosition(slideXfrmNode, slideLayoutXfrmNode, slideMasterXfrmNode)
   const { width, height } = getSize(slideXfrmNode, slideLayoutXfrmNode, slideMasterXfrmNode)
 
-  const isFlipV = getTextByPathList(slideXfrmNode, ['attrs', 'flipV']) === '1'
-  const isFlipH = getTextByPathList(slideXfrmNode, ['attrs', 'flipH']) === '1'
+  const xfrmNodes = [slideXfrmNode, slideLayoutXfrmNode, slideMasterXfrmNode]
 
-  const rotate = angleToDegrees(getTextByPathList(slideXfrmNode, ['attrs', 'rot']))
+  const isFlipV = getFirstDefinedXfrmAttr(xfrmNodes, 'flipV') === '1'
+  const isFlipH = getFirstDefinedXfrmAttr(xfrmNodes, 'flipH') === '1'
+
+  const rotate = angleToDegrees(getFirstDefinedXfrmAttr(xfrmNodes, 'rot'))
 
   const txtXframeNode = getTextByPathList(node, ['p:txXfrm'])
-  let txtRotate
+  let txtRotate = rotate
   if (txtXframeNode) {
     const txtXframeRot = getTextByPathList(txtXframeNode, ['attrs', 'rot'])
-    if (txtXframeRot) txtRotate = angleToDegrees(txtXframeRot) + 90
-  } 
-  else txtRotate = rotate
+    if (txtXframeRot) txtRotate = rotate + angleToDegrees(txtXframeRot)
+  }
 
   let content = ''
   if (node['p:txBody']) content = genTextBody(node['p:txBody'], node, slideLayoutSpNode, type, warpObj)
 
   const { borderColor, borderWidth, borderType, strokeDasharray } = getBorder(node, type, warpObj, groupHierarchy)
-  const fill = await getShapeFill(node, pNode, undefined, warpObj, source, groupHierarchy) || ''
+  let fill = await getShapeFill(node, pNode, undefined, warpObj, source, groupHierarchy) || ''
+  if (shapType === 'arc') fill = ''
 
   let fixedWidth = width
   let fixedHeight = height
@@ -1558,6 +1633,8 @@ async function genShape(node, pNode, slideLayoutSpNode, slideMasterSpNode, name,
     ...data,
     type: 'text',
     isVertical,
+    isFlipV: false,
+    isFlipH: false,
     rotate: txtRotate,
   }
 }
@@ -1581,22 +1658,21 @@ async function processPicNode(node, warpObj, source, groupHierarchy = []) {
   const imgArrayBuffer = await zip.file(imgName).async('arraybuffer')
 
   let xfrmNode = node['p:spPr']['a:xfrm']
-  if (!xfrmNode) {
-    const idx = getTextByPathList(node, ['p:nvPicPr', 'p:nvPr', 'p:ph', 'attrs', 'idx'])
-    if (idx) xfrmNode = getTextByPathList(warpObj['slideLayoutTables'], ['idxTable', idx, 'p:spPr', 'a:xfrm'])
-  }
+  const idx = getTextByPathList(node, ['p:nvPicPr', 'p:nvPr', 'p:ph', 'attrs', 'idx'])
+  const slideLayoutXfrmNode = idx ? getTextByPathList(warpObj['slideLayoutTables'], ['idxTable', idx, 'p:spPr', 'a:xfrm']) : undefined
+  const slideMasterXfrmNode = idx ? getTextByPathList(warpObj['slideMasterTables'], ['idxTable', idx, 'p:spPr', 'a:xfrm']) : undefined
+  if (!xfrmNode) xfrmNode = slideLayoutXfrmNode || slideMasterXfrmNode
 
   const mimeType = getMimeType(imgFileExt)
-  const { top, left } = getPosition(xfrmNode, undefined, undefined)
-  const { width, height } = getSize(xfrmNode, undefined, undefined)
+  const { top, left } = getPosition(xfrmNode, slideLayoutXfrmNode, slideMasterXfrmNode)
+  const { width, height } = getSize(xfrmNode, slideLayoutXfrmNode, slideMasterXfrmNode)
   const src = `data:${mimeType};base64,${base64ArrayBuffer(imgArrayBuffer)}`
 
-  const isFlipV = getTextByPathList(xfrmNode, ['attrs', 'flipV']) === '1'
-  const isFlipH = getTextByPathList(xfrmNode, ['attrs', 'flipH']) === '1'
+  const xfrmNodes = [xfrmNode, slideLayoutXfrmNode, slideMasterXfrmNode]
+  const isFlipV = getFirstDefinedXfrmAttr(xfrmNodes, 'flipV') === '1'
+  const isFlipH = getFirstDefinedXfrmAttr(xfrmNodes, 'flipH') === '1'
 
-  let rotate = 0
-  const rotateNode = getTextByPathList(node, ['p:spPr', 'a:xfrm', 'attrs', 'rot'])
-  if (rotateNode) rotate = angleToDegrees(rotateNode)
+  const rotate = angleToDegrees(getFirstDefinedXfrmAttr(xfrmNodes, 'rot'))
 
   const videoNode = getTextByPathList(node, ['p:nvPicPr', 'p:nvPr', 'a:videoFile'])
   let videoRid, videoFile, videoFileExt, videoMimeType, uInt8ArrayVideo, videoBlob

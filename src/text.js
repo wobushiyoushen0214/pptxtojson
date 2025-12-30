@@ -25,6 +25,7 @@ export function genTextBody(textBodyNode, spNode, slideLayoutSpNode, type, warpO
   const pNodes = pNode.constructor === Array ? pNode : [pNode]
 
   let currentListState = null
+  const listCounterByKey = new Map()
 
   for (const pNode of pNodes) {
     let rNode = pNode['a:r']
@@ -58,15 +59,21 @@ export function genTextBody(textBodyNode, spNode, slideLayoutSpNode, type, warpO
       if (!currentListState || currentListState.key !== nextKey) {
         if (currentListState) text += `</${currentListState.tag}>`
         text += `<${listInfo.tag} style="list-style: none; padding-left: 0; margin: 0;">`
+        const nextCounter = listInfo.kind === 'autoNum'
+          ? (listCounterByKey.has(nextKey) ? listCounterByKey.get(nextKey) : listInfo.startAt)
+          : null
         currentListState = {
           key: nextKey,
           tag: listInfo.tag,
           listInfo,
-          counter: listInfo.kind === 'autoNum' ? listInfo.startAt : null,
+          counter: nextCounter,
         }
       }
 
       const marker = getListMarker(currentListState)
+      if (currentListState.listInfo.kind === 'autoNum') {
+        listCounterByKey.set(currentListState.key, currentListState.counter)
+      }
       const bulletStyle = getListMarkerStyle(currentListState.listInfo)
       const indent = (listInfo.lvl - 1) * 1.5
       text += `<li style="text-align: ${align}; margin-left: ${indent}em;"><span style="${bulletStyle}">${marker}</span>`
@@ -75,6 +82,7 @@ export function genTextBody(textBodyNode, spNode, slideLayoutSpNode, type, warpO
       if (currentListState) {
         text += `</${currentListState.tag}>`
         currentListState = null
+        listCounterByKey.clear()
       }
       text += `<p style="text-align: ${align};">`
     }
@@ -219,6 +227,9 @@ function getListMarker(listState) {
 function formatAutoNumber(n, numType) {
   if (/circle/i.test(numType)) return toCircledNumber(n)
 
+  const lowerType = String(numType || '').toLowerCase()
+  const isChinese = lowerType.includes('chs') || lowerType.includes('cht')
+
   const bothParen = numType.includes('ParenBoth')
   let suffix = ''
   if (!bothParen) {
@@ -232,10 +243,13 @@ function formatAutoNumber(n, numType) {
   else if (numType.includes('alphaUc')) core = toAlpha(n, true)
   else if (numType.includes('romanLc')) core = toRoman(n, false)
   else if (numType.includes('romanUc')) core = toRoman(n, true)
+  else if (isChinese) core = toChineseNumber(n, lowerType.includes('cht'), lowerType.includes('db'))
   else core = String(n)
 
   if (bothParen) return `(${core})`
-  return `${core}${suffix}`
+
+  const finalSuffix = isChinese && suffix === '.' ? '、' : suffix
+  return `${core}${finalSuffix}`
 }
 
 function toCircledNumber(n) {
@@ -284,6 +298,91 @@ function toRoman(n, upper) {
     }
   }
   return upper ? r : r.toLowerCase()
+}
+
+function toChineseNumber(n, traditional, financial) {
+  const num = parseInt(n)
+  if (isNaN(num) || num <= 0) return String(n)
+
+  const digits = financial
+    ? ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九']
+    : ['零', '壹', '贰', '叁', '肆', '伍', '陆', '柒', '捌', '玖']
+
+  const units = financial ? ['', '拾', '佰', '仟'] : ['', '十', '百', '千']
+  const bigUnits = traditional
+    ? ['', '萬', '億', '兆']
+    : ['', '万', '亿', '兆']
+
+  const convertUnder10000 = (value) => {
+    const v = value % 10000
+    if (v === 0) return ''
+
+    const parts = []
+    const d3 = Math.floor(v / 1000)
+    const d2 = Math.floor((v % 1000) / 100)
+    const d1 = Math.floor((v % 100) / 10)
+    const d0 = v % 10
+
+    const ds = [d3, d2, d1, d0]
+    const us = [units[3], units[2], units[1], units[0]]
+
+    let zeroPending = false
+    for (let i = 0; i < ds.length; i++) {
+      const d = ds[i]
+      const u = us[i]
+      const isLast = i === ds.length - 1
+
+      if (d === 0) {
+        if (!isLast && parts.length) {
+          const rest = ds.slice(i + 1).some(x => x !== 0)
+          if (rest) zeroPending = true
+        }
+        continue
+      }
+
+      if (zeroPending) {
+        parts.push(digits[0])
+        zeroPending = false
+      }
+
+      if (u === units[1] && d === 1 && parts.length === 0) {
+        parts.push(u)
+      }
+      else {
+        parts.push(digits[d] + u)
+      }
+    }
+    return parts.join('')
+  }
+
+  if (num < 10000) return convertUnder10000(num)
+
+  const groups = []
+  let remaining = num
+  while (remaining > 0) {
+    groups.push(remaining % 10000)
+    remaining = Math.floor(remaining / 10000)
+  }
+
+  let out = ''
+  for (let i = groups.length - 1; i >= 0; i--) {
+    const g = groups[i]
+    if (g === 0) {
+      if (out && !out.endsWith(digits[0])) out += digits[0]
+      continue
+    }
+
+    if (out) {
+      const prevWasZero = out.endsWith(digits[0])
+      if (!prevWasZero && g < 1000) out += digits[0]
+      if (prevWasZero && g >= 1000) out = out.slice(0, -digits[0].length)
+    }
+
+    out += convertUnder10000(g) + (bigUnits[i] || '')
+  }
+
+  out = out.replace(/零+$/g, '')
+  return out || digits[0]
 }
 
 export function genSpanElement(node, pNode, textBodyNode, pFontStyle, slideLayoutSpNode, type, warpObj) {

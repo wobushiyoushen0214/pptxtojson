@@ -25,11 +25,19 @@ export function getBorder(node, elType, warpObj, groupHierarchy = []) {
 
   const isNoFill = getTextByPathList(lineNode, ['a:noFill'])
 
-  let borderWidth = isNoFill ? 0 : (parseInt(getTextByPathList(lineNode, ['attrs', 'w'])) / 12700)
-  if (isNaN(borderWidth)) {
-    if (lineNode) borderWidth = 0
-    else if (elType !== 'obj') borderWidth = 0
-    else borderWidth = 1
+  const wRaw = getTextByPathList(lineNode, ['attrs', 'w'])
+  const hasLineStyle = !!(
+    wRaw !== undefined ||
+    getTextByPathList(lineNode, ['a:prstDash']) ||
+    getTextByPathList(lineNode, ['a:solidFill']) ||
+    getTextByPathList(lineNode, ['a:gradFill']) ||
+    getTextByPathList(lineNode, ['a:pattFill'])
+  )
+
+  let borderWidth = 0
+  if (!isNoFill && hasLineStyle) {
+    borderWidth = parseInt(wRaw) / 12700
+    if (!Number.isFinite(borderWidth) || borderWidth <= 0) borderWidth = 1
   }
 
   let borderColor = getTextByPathList(lineNode, ['a:solidFill', 'a:srgbClr', 'attrs', 'val'])
