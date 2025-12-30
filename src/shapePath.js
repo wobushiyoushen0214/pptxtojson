@@ -709,9 +709,21 @@ export function getShapePath(shapType, w, h, node) {
     case 'diamond':
     case 'flowChartDecision':
     case 'flowChartSort':
-      pathData = `M ${w / 2} 0 L 0 ${h / 2} L ${w / 2} ${h} L ${w} ${h / 2} Z`
-      if (shapType === 'flowChartSort') {
-        pathData += ` M 0 ${h / 2} L ${w} ${h / 2}`
+      {
+        const shapAdjst = getTextByPathList(node, ['p:spPr', 'a:prstGeom', 'a:avLst', 'a:gd'])
+        let adj = 50000 // 默认 50%
+        if (shapAdjst) {
+          const adjFmla = getTextByPathList(shapAdjst, ['attrs', 'fmla'])
+          if (adjFmla && adjFmla.startsWith('val ')) {
+            adj = parseInt(adjFmla.substring(4))
+          }
+        }
+        const ratio = adj / 100000
+        pathData = `M ${w * ratio} 0 L 0 ${h * ratio} L ${w * ratio} ${h} L ${w} ${h * ratio} Z`
+
+        if (shapType === 'flowChartSort') {
+          pathData += ` M 0 ${h * ratio} L ${w} ${h * ratio}`
+        }
       }
       break
     case 'trapezoid':

@@ -15,18 +15,136 @@ import { findOMath, latexFormart, parseOMath } from './math'
 import { getShapePath } from './shapePath'
 import { parseTransition, findTransitionNode } from './animation'
 
-export async function parse(file) {
+function getPlaceholderType(node) {
+  const ph =
+    getTextByPathList(node, ['p:nvSpPr', 'p:nvPr', 'p:ph']) ||
+    getTextByPathList(node, ['p:nvPicPr', 'p:nvPr', 'p:ph']) ||
+    getTextByPathList(node, ['p:nvGraphicFramePr', 'p:nvPr', 'p:ph'])
+  if (!ph) return null
+  const t = getTextByPathList(ph, ['attrs', 'type'])
+  return t ? String(t) : null
+}
+
+function isHeaderFooterPlaceholderType(phType) {
+  return phType === 'dt' || phType === 'sldNum' || phType === 'ftr' || phType === 'hdr'
+}
+
+function getNodeName(node) {
+  return (
+    getTextByPathList(node, ['p:nvSpPr', 'p:cNvPr', 'attrs', 'name']) ||
+    getTextByPathList(node, ['p:nvPicPr', 'p:cNvPr', 'attrs', 'name']) ||
+    getTextByPathList(node, ['p:nvGraphicFramePr', 'p:cNvPr', 'attrs', 'name']) ||
+    ''
+  )
+}
+
+function isLikelyHeaderFooterName(name) {
+  if (!name) return false
+  const n = String(name)
+  return /(^|\b)(Footer Text|Header Text|Slide Number|Date)(\b|$)/i.test(n) || /页脚|页眉|页码|日期/.test(n)
+}
+
+function stripHtmlToPlainText(html) {
+  return String(html || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim()
+}
+
+function isPlaceholderPromptText(plainText) {
+  const t = String(plainText || '').replace(/\s+/g, ' ').trim()
+  if (!t) return false
+  const normalized = t.toLowerCase()
+  return (
+    normalized === 'click to add title' ||
+    normalized === 'click to add text' ||
+    normalized === 'click to add subtitle' ||
+    normalized === 'click to add notes' ||
+    /edit\s+master/.test(normalized) ||
+    /edit\s+the\s+master/.test(normalized) ||
+    /edit\s+master\s+(title|text)/.test(normalized) ||
+    t === '此处添加标题' ||
+    t === '单击以添加标题' ||
+    t === '单击此处添加标题' ||
+    t === '此处添加文本' ||
+    t === '单击以添加文本' ||
+    t === '单击此处添加文本' ||
+    t === '单击以添加副标题' ||
+    t === '单击此处添加副标题' ||
+    t.includes('编辑母版')
+  )
+}
+
+function shouldDropLikelyFooterNumberOrDate(el, slideHeight) {
+  if (!el || el.type !== 'text') return false
+  if (!Number.isFinite(slideHeight) || slideHeight <= 0) return false
+  if (!Number.isFinite(el.top) || !Number.isFinite(el.height)) return false
+
+  const plain = stripHtmlToPlainText(el.content)
+  if (!plain) return false
+
+  const nearBottom = el.top > slideHeight * 0.78
+  const smallBox = el.height < slideHeight * 0.2
+  if (!nearBottom || !smallBox) return false
+
+  const looksLikeNumber = /^[0-9]{1,3}$/.test(plain)
+  const looksLikeDate = /^(\d{4}[\-/]\d{1,2}[\-/]\d{1,2})$/.test(plain) || /(年\d{1,2}月\d{1,2}日)$/.test(plain)
+  const looksLikeKeyword = /页码|日期/.test(plain)
+
+  return looksLikeNumber || looksLikeDate || looksLikeKeyword
+}
+
+function filterElementsTree(elements, slideHeight) {
+  const out = []
+  for (const el of elements || []) {
+    if (!el) continue
+    if (isLikelyHeaderFooterName(el.name)) continue
+    if (shouldDropLikelyFooterNumberOrDate(el, slideHeight)) continue
+
+    if (el.type === 'text' && isPlaceholderPromptText(stripHtmlToPlainText(el.content))) continue
+
+    if (Array.isArray(el.elements)) {
+      const nextChildren = filterElementsTree(el.elements, slideHeight)
+      if (!nextChildren.length) continue
+      out.push({
+        ...el,
+        elements: nextChildren,
+      })
+      continue
+    }
+    out.push(el)
+  }
+  return out
+}
+
+function filterSlideOutput(slide, slideHeight) {
+  return {
+    ...slide,
+    elements: filterElementsTree(slide.elements, slideHeight),
+    layoutElements: filterElementsTree(slide.layoutElements, slideHeight),
+  }
+}
+
+function pushTrace(warpObj, step, data) {
+  if (!warpObj || !Array.isArray(warpObj.trace)) return
+  if (data === undefined) warpObj.trace.push({ step })
+  else warpObj.trace.push({ step, data })
+}
+
+export async function parse(file, options = {}) {
   const slides = []
   
   const zip = await JSZip.loadAsync(file)
 
   const filesInfo = await getContentTypes(zip)
-  const { width, height, defaultTextStyle } = await getSlideInfo(zip)
+  const { width, height, defaultTextStyle, headerFooter } = await getSlideInfo(zip)
   const { themeContent, themeColors } = await getTheme(zip)
 
-  for (const filename of filesInfo.slides) {
-    const singleSlide = await processSingleSlide(zip, filename, themeContent, defaultTextStyle)
-    slides.push(singleSlide)
+  const orderedSlides = await getSlidesInPresentationOrder(zip)
+  const slideFiles = orderedSlides.length ? orderedSlides : filesInfo.slides
+
+  for (let i = 0; i < slideFiles.length; i++) {
+    const filename = slideFiles[i]
+    const slideNo = i + 1
+    const singleSlide = await processSingleSlide(zip, filename, themeContent, defaultTextStyle, headerFooter, slideNo, options)
+    slides.push(filterSlideOutput(singleSlide, height))
   }
 
   return {
@@ -75,10 +193,27 @@ async function getSlideInfo(zip) {
   const content = await readXmlFile(zip, 'ppt/presentation.xml')
   const sldSzAttrs = content['p:presentation']['p:sldSz']['attrs']
   const defaultTextStyle = content['p:presentation']['p:defaultTextStyle']
+
+  const normalizeOn = (v) => {
+    if (v === undefined || v === null) return undefined
+    const s = String(v).toLowerCase()
+    return s === '1' || s === 'true' || s === 'on'
+  }
+
+  const defaultOn = (v) => (v === undefined ? true : v)
+
+  const hfAttrs = getTextByPathList(content, ['p:presentation', 'p:hf', 'attrs'])
+  const headerFooter = {
+    dt: defaultOn(normalizeOn(getTextByPathList(hfAttrs, ['dt']))),
+    ftr: defaultOn(normalizeOn(getTextByPathList(hfAttrs, ['ftr']))),
+    hdr: defaultOn(normalizeOn(getTextByPathList(hfAttrs, ['hdr']))),
+    sldNum: defaultOn(normalizeOn(getTextByPathList(hfAttrs, ['sldNum']))),
+  }
   return {
     width: parseInt(sldSzAttrs['cx']) * RATIO_EMUs_Points,
     height: parseInt(sldSzAttrs['cy']) * RATIO_EMUs_Points,
     defaultTextStyle,
+    headerFooter,
   }
 }
 
@@ -118,7 +253,41 @@ async function getTheme(zip) {
   return { themeContent, themeColors }
 }
 
-async function processSingleSlide(zip, sldFileName, themeContent, defaultTextStyle) {
+async function getSlidesInPresentationOrder(zip) {
+  const presentation = await readXmlFile(zip, 'ppt/presentation.xml')
+  const presentationRels = await readXmlFile(zip, 'ppt/_rels/presentation.xml.rels')
+  if (!presentation || !presentationRels) return []
+
+  const sldIdsRaw = getTextByPathList(presentation, ['p:presentation', 'p:sldIdLst', 'p:sldId'])
+  const sldIds = Array.isArray(sldIdsRaw) ? sldIdsRaw : (sldIdsRaw ? [sldIdsRaw] : [])
+
+  const relsRaw = getTextByPathList(presentationRels, ['Relationships', 'Relationship'])
+  const rels = Array.isArray(relsRaw) ? relsRaw : (relsRaw ? [relsRaw] : [])
+  const slideRelMap = new Map()
+  for (const r of rels) {
+    const type = getTextByPathList(r, ['attrs', 'Type'])
+    if (type !== 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide') continue
+    const id = getTextByPathList(r, ['attrs', 'Id'])
+    const target = getTextByPathList(r, ['attrs', 'Target'])
+    if (!id || !target) continue
+    slideRelMap.set(String(id), String(target))
+  }
+
+  const out = []
+  for (const s of sldIds) {
+    const rId = getTextByPathList(s, ['attrs', 'r:id'])
+    if (!rId) continue
+    const target = slideRelMap.get(String(rId))
+    if (!target) continue
+
+    if (target.startsWith('ppt/')) out.push(target)
+    else if (target.startsWith('../')) out.push(target.replace('../', 'ppt/'))
+    else out.push('ppt/' + target.replace(/^\//, ''))
+  }
+  return out
+}
+
+async function processSingleSlide(zip, sldFileName, themeContent, defaultTextStyle, headerFooter, slideNo, options = {}) {
   const resName = sldFileName.replace('slides/slide', 'slides/_rels/slide') + '.rels'
   const resContent = await readXmlFile(zip, resName)
   let relationshipArray = resContent['Relationships']['Relationship']
@@ -168,6 +337,22 @@ async function processSingleSlide(zip, sldFileName, themeContent, defaultTextSty
         }
     }
   }
+
+  const trace = options && options.trace ? [] : null
+  const traceEnabled = !!trace
+
+  if (traceEnabled) {
+    trace.push({
+      step: 'slide/rels',
+      data: {
+        slideNo,
+        sldFileName,
+        slideRels: resName,
+        noteFilename,
+        layoutFilename,
+      },
+    })
+  }
   
   const slideNotesContent = await readXmlFile(zip, noteFilename)
   const note = getNote(slideNotesContent)
@@ -192,6 +377,17 @@ async function processSingleSlide(zip, sldFileName, themeContent, defaultTextSty
     }
   }
 
+  if (traceEnabled) {
+    trace.push({
+      step: 'slideLayout/rels',
+      data: {
+        slideLayout: layoutFilename,
+        slideLayoutRels: slideLayoutResFilename,
+        slideMaster: masterFilename,
+      },
+    })
+  }
+
   const slideMasterContent = await readXmlFile(zip, masterFilename)
   const slideMasterTextStyles = getTextByPathList(slideMasterContent, ['p:sldMaster', 'p:txStyles'])
   const slideMasterTables = indexNodes(slideMasterContent)
@@ -211,6 +407,17 @@ async function processSingleSlide(zip, sldFileName, themeContent, defaultTextSty
           target: relationshipArrayItem['attrs']['Target'].replace('../', 'ppt/'),
         }
     }
+  }
+
+  if (traceEnabled) {
+    trace.push({
+      step: 'slideMaster/rels',
+      data: {
+        slideMaster: masterFilename,
+        slideMasterRels: slideMasterResFilename,
+        themeFilename,
+      },
+    })
   }
 
   let slideThemeContent = themeContent
@@ -278,6 +485,10 @@ async function processSingleSlide(zip, sldFileName, themeContent, defaultTextSty
 
   const slideContent = await readXmlFile(zip, sldFileName)
   const nodes = slideContent['p:sld']['p:cSld']['p:spTree']
+
+  const slideAttrs = getTextByPathList(slideContent, ['p:sld', 'attrs'])
+  const showPh = getTextByPathList(slideAttrs, ['showPh'])
+
   const warpObj = {
     zip,
     slideLayoutContent,
@@ -299,6 +510,9 @@ async function processSingleSlide(zip, sldFileName, themeContent, defaultTextSty
     diagramResObjByTarget,
     diagramDrawingCursor: 0,
     defaultTextStyle,
+    headerFooter,
+    slideNo,
+    trace,
   }
   const layoutElements = await getLayoutElements(warpObj)
   const fill = await getSlideBackgroundFill(warpObj)
@@ -307,6 +521,17 @@ async function processSingleSlide(zip, sldFileName, themeContent, defaultTextSty
   for (const nodeKey in nodes) {
     if (nodes[nodeKey].constructor !== Array) nodes[nodeKey] = [nodes[nodeKey]]
     for (const node of nodes[nodeKey]) {
+      if (showPh === '0') {
+        const ph =
+          getTextByPathList(node, ['p:nvSpPr', 'p:nvPr', 'p:ph']) ||
+          getTextByPathList(node, ['p:nvPicPr', 'p:nvPr', 'p:ph']) ||
+          getTextByPathList(node, ['p:nvGraphicFramePr', 'p:nvPr', 'p:ph'])
+        if (ph) continue
+      }
+
+      const phType = getPlaceholderType(node)
+      if (isHeaderFooterPlaceholderType(phType)) continue
+
       const ret = await processNodesInSlide(nodeKey, node, nodes, warpObj, 'slide')
       if (ret) elements.push(ret)
     }
@@ -321,13 +546,17 @@ async function processSingleSlide(zip, sldFileName, themeContent, defaultTextSty
 
   const transition = parseTransition(transitionNode)
 
-  return {
+  const out = {
     fill,
     elements,
     layoutElements,
     note,
     transition,
   }
+
+  if (traceEnabled && trace.length) out.trace = trace
+
+  return out
 }
 
 function getNote(noteContent) {
@@ -353,50 +582,349 @@ async function getLayoutElements(warpObj) {
   const elements = []
   const slideLayoutContent = warpObj['slideLayoutContent']
   const slideMasterContent = warpObj['slideMasterContent']
+  const slideContent = warpObj['slideContent']
   const nodesSldLayout = getTextByPathList(slideLayoutContent, ['p:sldLayout', 'p:cSld', 'p:spTree'])
   const nodesSldMaster = getTextByPathList(slideMasterContent, ['p:sldMaster', 'p:cSld', 'p:spTree'])
 
+  const placeholderOverrides = new Set()
+  const slideSpTree = getTextByPathList(slideContent, ['p:sld', 'p:cSld', 'p:spTree'])
+
+  const slideAttrs = getTextByPathList(slideContent, ['p:sld', 'attrs'])
+  const slideShowMasterSp = getTextByPathList(slideAttrs, ['showMasterSp'])
+  const slideShowMasterPh = getTextByPathList(slideAttrs, ['showMasterPh'])
+  const slideShowPh = getTextByPathList(slideAttrs, ['showPh'])
+
+  pushTrace(warpObj, 'layout/start', {
+    slideNo: warpObj && warpObj.slideNo,
+    slideShowPh,
+    slideShowMasterSp,
+    slideShowMasterPh,
+  })
+
+  const addOverrideKeys = (type, idx) => {
+    const t = type || ''
+    const i = idx || ''
+    if (!t && !i) return
+    placeholderOverrides.add(`${t}|${i}`)
+    if (t) placeholderOverrides.add(`${t}|`)
+    if (i) placeholderOverrides.add(`|${i}`)
+  }
+
+  const hasTxBodyText = (n) => {
+    const txBody = getTextByPathList(n, ['p:txBody'])
+    if (!txBody) return false
+
+    const pNodes = getTextByPathList(txBody, ['a:p'])
+    const pList = Array.isArray(pNodes) ? pNodes : (pNodes ? [pNodes] : [])
+    for (const p of pList) {
+      const rs = getTextByPathList(p, ['a:r'])
+      const rList = Array.isArray(rs) ? rs : (rs ? [rs] : [])
+      for (const r of rList) {
+        const t = getTextByPathList(r, ['a:t'])
+        if (typeof t === 'string' && t.trim() !== '') return true
+      }
+
+      const flds = getTextByPathList(p, ['a:fld'])
+      const fList = Array.isArray(flds) ? flds : (flds ? [flds] : [])
+      for (const f of fList) {
+        const t = getTextByPathList(f, ['a:t'])
+        if (typeof t === 'string' && t.trim() !== '') return true
+      }
+    }
+
+    return false
+  }
+
+  const isMasterPlaceholderRenderable = (node, parts) => {
+    if (!parts || !parts.type) return false
+
+    const t = String(parts.type)
+    const allowTypes = new Set(['ftr'])
+    if (!allowTypes.has(t)) return false
+
+    const normalizeOn = (v) => {
+      if (v === undefined || v === null) return false
+      const s = String(v).toLowerCase()
+      return s === '1' || s === 'true' || s === 'on'
+    }
+
+    const slideHdrFtrAttrs = getTextByPathList(warpObj, ['slideContent', 'p:sld', 'p:hdrFtr', 'attrs'])
+    const slideFlag = getTextByPathList(slideHdrFtrAttrs, [t])
+    const isEnabledBySlide = slideFlag !== undefined ? normalizeOn(slideFlag) : undefined
+    const isEnabledByPresentation = warpObj && warpObj.headerFooter && warpObj.headerFooter[t] !== undefined ? !!warpObj.headerFooter[t] : undefined
+    const isEnabled = isEnabledBySlide !== undefined ? isEnabledBySlide : (isEnabledByPresentation !== undefined ? isEnabledByPresentation : true)
+    if (!isEnabled) return false
+
+    if (t === 'ftr') return hasTxBodyText(node)
+
+    return false
+  }
+
+  const isPlaceholderNode = (node) => {
+    const ph =
+      getTextByPathList(node, ['p:nvSpPr', 'p:nvPr', 'p:ph']) ||
+      getTextByPathList(node, ['p:nvPicPr', 'p:nvPr', 'p:ph']) ||
+      getTextByPathList(node, ['p:nvGraphicFramePr', 'p:nvPr', 'p:ph'])
+    return !!ph
+  }
+
+  const extractPlaceholderKeyParts = node => {
+    const ph =
+      getTextByPathList(node, ['p:nvSpPr', 'p:nvPr', 'p:ph']) ||
+      getTextByPathList(node, ['p:nvPicPr', 'p:nvPr', 'p:ph']) ||
+      getTextByPathList(node, ['p:nvGraphicFramePr', 'p:nvPr', 'p:ph'])
+    if (!ph) return null
+    const type = getTextByPathList(ph, ['attrs', 'type'])
+    const idx = getTextByPathList(ph, ['attrs', 'idx'])
+    if (!type && !idx) return null
+    return { type, idx }
+  }
+
+  const walkAndCollectOverrides = (nodeKey, node) => {
+    if (!node) return
+
+    const parts = extractPlaceholderKeyParts(node)
+    if (parts) addOverrideKeys(parts.type, parts.idx)
+
+    if (nodeKey === 'p:grpSp') {
+      for (const k in node) {
+        if (k === 'p:nvGrpSpPr' || k === 'p:grpSpPr') continue
+        const v = node[k]
+        if (Array.isArray(v)) {
+          for (const item of v) walkAndCollectOverrides(k, item)
+        }
+        else {
+          walkAndCollectOverrides(k, v)
+        }
+      }
+      return
+    }
+
+    if (nodeKey === 'mc:AlternateContent') {
+      const fallback = getTextByPathList(node, ['mc:Fallback'])
+      const fallbackGroup = fallback && (fallback['p:grpSp'] || fallback)
+      if (fallbackGroup) {
+        if (fallbackGroup['p:grpSpPr']) walkAndCollectOverrides('p:grpSp', fallbackGroup)
+        else {
+          for (const k in fallbackGroup) {
+            const v = fallbackGroup[k]
+            if (Array.isArray(v)) {
+              for (const item of v) walkAndCollectOverrides(k, item)
+            }
+            else walkAndCollectOverrides(k, v)
+          }
+        }
+      }
+    }
+  }
+
+  const addOverridesFromSpTree = (spTreeNode) => {
+    if (!spTreeNode) return
+    for (const nodeKey in spTreeNode) {
+      const v = spTreeNode[nodeKey]
+      if (Array.isArray(v)) {
+        for (const item of v) walkAndCollectOverrides(nodeKey, item)
+      }
+      else {
+        walkAndCollectOverrides(nodeKey, v)
+      }
+    }
+  }
+
+  const isOverriddenByPlaceholderSet = (type, idx) => {
+    const t = type || ''
+    const i = idx || ''
+    if (placeholderOverrides.has(`${t}|${i}`)) return true
+    if (t && placeholderOverrides.has(`${t}|`)) return true
+    if (i && placeholderOverrides.has(`|${i}`)) return true
+    return false
+  }
+
+  const pruneLayoutElement = (el) => {
+    if (!el) return null
+    if (isOverriddenByPlaceholderSet(el.placeholderType, el.placeholderIdx)) return null
+
+    if (Array.isArray(el.elements)) {
+      const nextChildren = []
+      for (const child of el.elements) {
+        const next = pruneLayoutElement(child)
+        if (next) nextChildren.push(next)
+      }
+      if (!nextChildren.length) return null
+      return {
+        ...el,
+        elements: nextChildren,
+      }
+    }
+    return el
+  }
+
+  addOverridesFromSpTree(slideSpTree)
+  pushTrace(warpObj, 'layout/overrides/fromSlide', { size: placeholderOverrides.size })
+
   const showMasterSp = getTextByPathList(slideLayoutContent, ['p:sldLayout', 'attrs', 'showMasterSp'])
+  const showMasterPh = getTextByPathList(slideLayoutContent, ['p:sldLayout', 'attrs', 'showMasterPh'])
+
+  let layoutKept = 0
+  let layoutSkipShowPh = 0
+  let layoutSkipOverridden = 0
+  let layoutSkipNotRenderable = 0
+
   if (nodesSldLayout) {
     for (const nodeKey in nodesSldLayout) {
       if (nodesSldLayout[nodeKey].constructor === Array) {
         for (let i = 0; i < nodesSldLayout[nodeKey].length; i++) {
-          const ph = getTextByPathList(nodesSldLayout[nodeKey][i], ['p:nvSpPr', 'p:nvPr', 'p:ph'])
-          if (!ph) {
-            const ret = await processNodesInSlide(nodeKey, nodesSldLayout[nodeKey][i], nodesSldLayout, warpObj, 'slideLayoutBg')
-            if (ret) elements.push(ret)
+          const currentNode = nodesSldLayout[nodeKey][i]
+          if (slideShowPh === '0' && isPlaceholderNode(currentNode)) {
+            layoutSkipShowPh += 1
+            continue
+          }
+          const parts = extractPlaceholderKeyParts(currentNode)
+          if (parts) {
+            const t = parts.type || ''
+            const idx = parts.idx || ''
+            if (placeholderOverrides.has(`${t}|${idx}`) || (t && placeholderOverrides.has(`${t}|`)) || (idx && placeholderOverrides.has(`|${idx}`))) {
+              layoutSkipOverridden += 1
+              continue
+            }
+            if (!isMasterPlaceholderRenderable(currentNode, parts)) {
+              layoutSkipNotRenderable += 1
+              continue
+            }
+          }
+
+          const ret = await processNodesInSlide(nodeKey, currentNode, nodesSldLayout, warpObj, 'slideLayoutBg')
+          const pruned = pruneLayoutElement(ret)
+          if (pruned) {
+            elements.push(pruned)
+            layoutKept += 1
           }
         }
       } 
       else {
-        const ph = getTextByPathList(nodesSldLayout[nodeKey], ['p:nvSpPr', 'p:nvPr', 'p:ph'])
-        if (!ph) {
-          const ret = await processNodesInSlide(nodeKey, nodesSldLayout[nodeKey], nodesSldLayout, warpObj, 'slideLayoutBg')
-          if (ret) elements.push(ret)
+        const currentNode = nodesSldLayout[nodeKey]
+        if (slideShowPh === '0' && isPlaceholderNode(currentNode)) {
+          layoutSkipShowPh += 1
+          continue
+        }
+        const parts = extractPlaceholderKeyParts(currentNode)
+        if (parts) {
+          const t = parts.type || ''
+          const idx = parts.idx || ''
+          if (placeholderOverrides.has(`${t}|${idx}`) || (t && placeholderOverrides.has(`${t}|`)) || (idx && placeholderOverrides.has(`|${idx}`))) {
+            layoutSkipOverridden += 1
+            continue
+          }
+          if (!isMasterPlaceholderRenderable(currentNode, parts)) {
+            layoutSkipNotRenderable += 1
+            continue
+          }
+        }
+
+        const ret = await processNodesInSlide(nodeKey, currentNode, nodesSldLayout, warpObj, 'slideLayoutBg')
+        const pruned = pruneLayoutElement(ret)
+        if (pruned) {
+          elements.push(pruned)
+          layoutKept += 1
         }
       }
     }
   }
-  if (nodesSldMaster && showMasterSp !== '0') {
+
+  pushTrace(warpObj, 'layout/layoutElements', {
+    showMasterSp,
+    showMasterPh,
+    kept: layoutKept,
+    skipShowPh: layoutSkipShowPh,
+    skipOverridden: layoutSkipOverridden,
+    skipNotRenderable: layoutSkipNotRenderable,
+  })
+
+  addOverridesFromSpTree(nodesSldLayout)
+  pushTrace(warpObj, 'layout/overrides/fromLayout', { size: placeholderOverrides.size })
+
+  let masterKept = 0
+  let masterSkipShowPh = 0
+  let masterSkipShowMasterPh = 0
+  let masterSkipOverridden = 0
+  let masterSkipNotRenderable = 0
+
+  if (nodesSldMaster && showMasterSp !== '0' && slideShowMasterSp !== '0') {
     for (const nodeKey in nodesSldMaster) {
       if (nodesSldMaster[nodeKey].constructor === Array) {
         for (let i = 0; i < nodesSldMaster[nodeKey].length; i++) {
-          const ph = getTextByPathList(nodesSldMaster[nodeKey][i], ['p:nvSpPr', 'p:nvPr', 'p:ph'])
-          if (!ph) {
-            const ret = await processNodesInSlide(nodeKey, nodesSldMaster[nodeKey][i], nodesSldMaster, warpObj, 'slideMasterBg')
-            if (ret) elements.push(ret)
+          const currentNode = nodesSldMaster[nodeKey][i]
+          if (slideShowPh === '0' && isPlaceholderNode(currentNode)) {
+            masterSkipShowPh += 1
+            continue
+          }
+          const parts = extractPlaceholderKeyParts(currentNode)
+          if (parts) {
+            if (showMasterPh === '0' || slideShowMasterPh === '0') {
+              masterSkipShowMasterPh += 1
+              continue
+            }
+            const t = parts.type || ''
+            const idx = parts.idx || ''
+            if (placeholderOverrides.has(`${t}|${idx}`) || (t && placeholderOverrides.has(`${t}|`)) || (idx && placeholderOverrides.has(`|${idx}`))) {
+              masterSkipOverridden += 1
+              continue
+            }
+            if (!isMasterPlaceholderRenderable(currentNode, parts)) {
+              masterSkipNotRenderable += 1
+              continue
+            }
+          }
+
+          const ret = await processNodesInSlide(nodeKey, currentNode, nodesSldMaster, warpObj, 'slideMasterBg')
+          const pruned = pruneLayoutElement(ret)
+          if (pruned) {
+            elements.push(pruned)
+            masterKept += 1
           }
         }
       } 
       else {
-        const ph = getTextByPathList(nodesSldMaster[nodeKey], ['p:nvSpPr', 'p:nvPr', 'p:ph'])
-        if (!ph) {
-          const ret = await processNodesInSlide(nodeKey, nodesSldMaster[nodeKey], nodesSldMaster, warpObj, 'slideMasterBg')
-          if (ret) elements.push(ret)
+        const currentNode = nodesSldMaster[nodeKey]
+        if (slideShowPh === '0' && isPlaceholderNode(currentNode)) {
+          masterSkipShowPh += 1
+          continue
+        }
+        const parts = extractPlaceholderKeyParts(currentNode)
+        if (parts) {
+          if (showMasterPh === '0' || slideShowMasterPh === '0') {
+            masterSkipShowMasterPh += 1
+            continue
+          }
+          const t = parts.type || ''
+          const idx = parts.idx || ''
+          if (placeholderOverrides.has(`${t}|${idx}`) || (t && placeholderOverrides.has(`${t}|`)) || (idx && placeholderOverrides.has(`|${idx}`))) {
+            masterSkipOverridden += 1
+            continue
+          }
+          if (!isMasterPlaceholderRenderable(currentNode, parts)) {
+            masterSkipNotRenderable += 1
+            continue
+          }
+        }
+
+        const ret = await processNodesInSlide(nodeKey, currentNode, nodesSldMaster, warpObj, 'slideMasterBg')
+        const pruned = pruneLayoutElement(ret)
+        if (pruned) {
+          elements.push(pruned)
+          masterKept += 1
         }
       }
     }
   }
+
+  pushTrace(warpObj, 'layout/masterElements', {
+    kept: masterKept,
+    skipShowPh: masterSkipShowPh,
+    skipShowMasterPh: masterSkipShowMasterPh,
+    skipOverridden: masterSkipOverridden,
+    skipNotRenderable: masterSkipNotRenderable,
+  })
   return elements
 }
 
@@ -410,6 +938,13 @@ function sortElementsByOrder(elements) {
   })
 }
 
+function getGroupXfrmNode(groupNode) {
+  return (
+    getTextByPathList(groupNode, ['p:grpSpPr', 'a:xfrm']) ||
+    getTextByPathList(groupNode, ['p:grpSp', 'p:grpSpPr', 'a:xfrm'])
+  )
+}
+
 function scaleElementTree(element, ws, hs) {
   if (!element) return element
 
@@ -420,11 +955,100 @@ function scaleElementTree(element, ws, hs) {
   if (typeof next.width === 'number') next.width = numberToFixed(next.width * ws)
   if (typeof next.height === 'number') next.height = numberToFixed(next.height * hs)
 
+  if (typeof next.borderWidth === 'number') next.borderWidth = numberToFixed(next.borderWidth * Math.max(ws, hs))
+
+  if (typeof next.path === 'string') {
+    next.path = scaleSvgPathData(next.path, ws, hs)
+  }
+
+  if (next.content) {
+    next.content = scaleContentFont(next.content, hs)
+  }
+
   if (Array.isArray(next.elements)) {
     next.elements = next.elements.map(child => scaleElementTree(child, ws, hs))
   }
 
   return next
+}
+
+function scaleContentFont(html, scale) {
+  if (scale === 1 || !html) return html
+  return html.replace(/(font-size:\s*)([\d.]+)pt/g, (match, prefix, size) => {
+    const newSize = parseFloat(size) * scale
+    return `${prefix}${numberToFixed(newSize)}pt`
+  })
+}
+
+function scaleSvgPathData(d, ws, hs) {
+  if (!d) return d
+  if (ws === 1 && hs === 1) return d
+
+  const tokens = String(d).match(/[a-zA-Z]|[-+]?(?:\d*\.\d+|\d+)(?:e[-+]?\d+)?/g)
+  if (!tokens) return d
+
+  const groupLenByCmd = {
+    M: 2,
+    L: 2,
+    T: 2,
+    H: 1,
+    V: 1,
+    C: 6,
+    S: 4,
+    Q: 4,
+    A: 7,
+    Z: 0,
+  }
+
+  const out = []
+  let cmd = null
+  let idxInCmd = 0
+
+  for (const token of tokens) {
+    if (/^[a-zA-Z]$/.test(token)) {
+      cmd = token
+      idxInCmd = 0
+      out.push(token)
+      continue
+    }
+
+    const cmdUpper = cmd ? cmd.toUpperCase() : ''
+    const groupLen = groupLenByCmd[cmdUpper]
+    if (!groupLen) {
+      out.push(token)
+      continue
+    }
+
+    const pos = idxInCmd % groupLen
+    let nextToken = token
+
+    if (cmdUpper === 'A' && (pos === 2 || pos === 3 || pos === 4)) {
+      nextToken = token
+    }
+    else {
+      const n = parseFloat(token)
+      if (!isNaN(n)) {
+        let scaled = n
+        if (cmdUpper === 'H') scaled = n * ws
+        else if (cmdUpper === 'V') scaled = n * hs
+        else if (cmdUpper === 'A') {
+          if (pos === 0) scaled = n * ws
+          else if (pos === 1) scaled = n * hs
+          else if (pos === 5) scaled = n * ws
+          else if (pos === 6) scaled = n * hs
+        }
+        else {
+          scaled = (pos % 2 === 0) ? (n * ws) : (n * hs)
+        }
+        nextToken = String(numberToFixed(scaled))
+      }
+    }
+
+    out.push(nextToken)
+    idxInCmd += 1
+  }
+
+  return out.join(' ')
 }
 
 function indexNodes(content) {
@@ -433,41 +1057,78 @@ function indexNodes(content) {
   const idTable = {}
   const idxTable = {}
   const typeTable = {}
+  const typeIdxTable = {}
 
-  for (const key in spTreeNode) {
-    if (key === 'p:nvGrpSpPr' || key === 'p:grpSpPr') continue
+  const extractNvPr = (node) => {
+    if (!node) return null
+    return node['p:nvSpPr'] || node['p:nvPicPr'] || node['p:nvGraphicFramePr'] || null
+  }
 
-    const targetNode = spTreeNode[key]
+  const indexSingleNode = (node) => {
+    const nv = extractNvPr(node)
+    if (!nv) return
 
-    if (targetNode.constructor === Array) {
-      for (const targetNodeItem of targetNode) {
-        const nvSpPrNode = targetNodeItem['p:nvSpPr']
-        const id = getTextByPathList(nvSpPrNode, ['p:cNvPr', 'attrs', 'id'])
-        const idx = getTextByPathList(nvSpPrNode, ['p:nvPr', 'p:ph', 'attrs', 'idx'])
-        const type = getTextByPathList(nvSpPrNode, ['p:nvPr', 'p:ph', 'attrs', 'type'])
+    const id = getTextByPathList(nv, ['p:cNvPr', 'attrs', 'id'])
+    const idx = getTextByPathList(nv, ['p:nvPr', 'p:ph', 'attrs', 'idx'])
+    const type = getTextByPathList(nv, ['p:nvPr', 'p:ph', 'attrs', 'type'])
 
-        if (id) idTable[id] = targetNodeItem
-        if (idx) idxTable[idx] = targetNodeItem
-        if (type) typeTable[type] = targetNodeItem
+    if (id) idTable[id] = node
+    if (idx) idxTable[idx] = node
+    if (type) typeTable[type] = node
+    if (type && idx) typeIdxTable[`${type}|${idx}`] = node
+  }
+
+  const walkContainer = (container) => {
+    if (!container) return
+    for (const key in container) {
+      if (key === 'p:nvGrpSpPr' || key === 'p:grpSpPr') continue
+      const v = container[key]
+      if (Array.isArray(v)) {
+        for (const item of v) walkNode(key, item)
       }
-    } 
-    else {
-      const nvSpPrNode = targetNode['p:nvSpPr']
-      const id = getTextByPathList(nvSpPrNode, ['p:cNvPr', 'attrs', 'id'])
-      const idx = getTextByPathList(nvSpPrNode, ['p:nvPr', 'p:ph', 'attrs', 'idx'])
-      const type = getTextByPathList(nvSpPrNode, ['p:nvPr', 'p:ph', 'attrs', 'type'])
-
-      if (id) idTable[id] = targetNode
-      if (idx) idxTable[idx] = targetNode
-      if (type) typeTable[type] = targetNode
+      else {
+        walkNode(key, v)
+      }
     }
   }
 
-  return { idTable, idxTable, typeTable }
+  const walkNode = (nodeKey, node) => {
+    if (!node) return
+
+    if (nodeKey === 'p:sp' || nodeKey === 'p:pic' || nodeKey === 'p:graphicFrame') {
+      indexSingleNode(node)
+      return
+    }
+
+    if (nodeKey === 'p:grpSp') {
+      walkContainer(node)
+      return
+    }
+
+    if (nodeKey === 'mc:AlternateContent') {
+      const fallback = getTextByPathList(node, ['mc:Fallback'])
+      const fallbackGroup = fallback && (fallback['p:grpSp'] || fallback)
+      if (fallbackGroup) {
+        if (fallbackGroup['p:grpSpPr']) walkNode('p:grpSp', fallbackGroup)
+        else walkContainer(fallbackGroup)
+      }
+      
+    }
+  }
+
+  walkContainer(spTreeNode)
+
+  return { idTable, idxTable, typeTable, typeIdxTable }
 }
 
 async function processNodesInSlide(nodeKey, nodeValue, nodes, warpObj, source, groupHierarchy = []) {
   let json
+
+  const phType = getPlaceholderType(nodeValue)
+  if (isHeaderFooterPlaceholderType(phType)) return null
+
+  const nodeName = getNodeName(nodeValue)
+  if (isLikelyHeaderFooterName(nodeName)) return null
 
   switch (nodeKey) {
     case 'p:sp': // Shape, Text
@@ -486,11 +1147,16 @@ async function processNodesInSlide(nodeKey, nodeValue, nodes, warpObj, source, g
       json = await processGroupSpNode(nodeValue, warpObj, source, groupHierarchy)
       break
     case 'mc:AlternateContent':
-      if (getTextByPathList(nodeValue, ['mc:Fallback', 'p:grpSpPr', 'a:xfrm'])) {
-        json = await processGroupSpNode(getTextByPathList(nodeValue, ['mc:Fallback']), warpObj, source, groupHierarchy)
-      }
-      else if (getTextByPathList(nodeValue, ['mc:Choice'])) {
-        json = await processMathNode(nodeValue, warpObj, source)
+      {
+        const fallback = getTextByPathList(nodeValue, ['mc:Fallback'])
+        const fallbackGroup = fallback && (fallback['p:grpSp'] || fallback)
+        if (fallbackGroup && getGroupXfrmNode(fallbackGroup)) {
+          json = await processGroupSpNode(fallbackGroup, warpObj, source, groupHierarchy)
+          break
+        }
+        if (getTextByPathList(nodeValue, ['mc:Choice'])) {
+          json = await processMathNode(nodeValue, warpObj, source)
+        }
       }
       break
     default:
@@ -535,8 +1201,11 @@ async function processMathNode(node, warpObj, source) {
 
 async function processGroupSpNode(node, warpObj, source, parentGroupHierarchy = []) {
   const order = node['attrs']['order']
-  const xfrmNode = getTextByPathList(node, ['p:grpSpPr', 'a:xfrm'])
+  const xfrmNode = getGroupXfrmNode(node)
   if (!xfrmNode) return null
+
+  const groupName = getTextByPathList(node, ['p:nvGrpSpPr', 'p:cNvPr', 'attrs', 'name']) || ''
+  const groupId = getTextByPathList(node, ['p:nvGrpSpPr', 'p:cNvPr', 'attrs', 'id']) || ''
 
   const x = parseInt(xfrmNode['a:off']['attrs']['x']) * RATIO_EMUs_Points
   const y = parseInt(xfrmNode['a:off']['attrs']['y']) * RATIO_EMUs_Points
@@ -557,11 +1226,46 @@ async function processGroupSpNode(node, warpObj, source, parentGroupHierarchy = 
   let rotate = getTextByPathList(xfrmNode, ['attrs', 'rot']) || 0
   if (rotate) rotate = angleToDegrees(rotate)
 
-  const ws = (!chcx || isNaN(chcx)) ? 1 : (cx / chcx)
-  const hs = (!chcy || isNaN(chcy)) ? 1 : (cy / chcy)
+  const ws = (!chcx || isNaN(chcx) || !cx) ? 1 : (cx / chcx)
+  const hs = (!chcy || isNaN(chcy) || !cy) ? 1 : (cy / chcy)
+
 
   // 构建当前组合层级（将当前组合添加到父级层级中）
   const currentGroupHierarchy = [...parentGroupHierarchy, node]
+
+  const getGroupLabel = (n) => {
+    if (!n) return ''
+    const name = getTextByPathList(n, ['p:nvGrpSpPr', 'p:cNvPr', 'attrs', 'name'])
+    const id = getTextByPathList(n, ['p:nvGrpSpPr', 'p:cNvPr', 'attrs', 'id'])
+    const nodeOrder = getTextByPathList(n, ['attrs', 'order'])
+    const parts = []
+    if (name) parts.push(String(name))
+    if (id) parts.push(`#${id}`)
+    if (nodeOrder !== undefined) parts.push(`@${nodeOrder}`)
+    return parts.join('')
+  }
+
+  pushTrace(warpObj, 'group/start', {
+    slideNo: warpObj && warpObj.slideNo,
+    source,
+    name: groupName,
+    id: groupId,
+    order,
+    hierarchy: currentGroupHierarchy.map(getGroupLabel).filter(Boolean),
+    x,
+    y,
+    cx,
+    cy,
+    chx,
+    chy,
+    chcx,
+    chcy,
+    ws,
+    hs,
+    isFlipV,
+    isFlipH,
+    rotate,
+  })
 
   const elements = []
   for (const nodeKey in node) {
@@ -579,31 +1283,111 @@ async function processGroupSpNode(node, warpObj, source, parentGroupHierarchy = 
 
   sortElementsByOrder(elements)
 
+  let bboxMinX = Infinity
+  let bboxMinY = Infinity
+  let bboxMaxX = -Infinity
+  let bboxMaxY = -Infinity
+  for (const el of elements) {
+    if (!el || typeof el.left !== 'number' || typeof el.top !== 'number') continue
+    const r = el.left + (typeof el.width === 'number' ? el.width : 0)
+    const b = el.top + (typeof el.height === 'number' ? el.height : 0)
+    bboxMinX = Math.min(bboxMinX, el.left)
+    bboxMinY = Math.min(bboxMinY, el.top)
+    bboxMaxX = Math.max(bboxMaxX, r)
+    bboxMaxY = Math.max(bboxMaxY, b)
+  }
+
+  const hasBBox = Number.isFinite(bboxMinX) && Number.isFinite(bboxMinY) && Number.isFinite(bboxMaxX) && Number.isFinite(bboxMaxY)
+  const isLooseGroup = !Number.isFinite(cx) || !Number.isFinite(cy) || !cx || !cy || !Number.isFinite(chcx) || !Number.isFinite(chcy) || !chcx || !chcy
+
+  const bboxW = hasBBox ? (bboxMaxX - bboxMinX) : 0
+  const bboxH = hasBBox ? (bboxMaxY - bboxMinY) : 0
+  const eps = Math.max(1, Math.min(Number.isFinite(cx) ? cx : 0, Number.isFinite(cy) ? cy : 0) * 0.002)
+
+  const errToSlide = hasBBox ? (Math.abs(bboxW - cx) + Math.abs(bboxH - cy) + Math.abs(bboxMinX - x) + Math.abs(bboxMinY - y)) : Infinity
+  const errToChild = hasBBox ? (Math.abs(bboxW - chcx) + Math.abs(bboxH - chcy) + Math.abs(bboxMinX - chx) + Math.abs(bboxMinY - chy)) : Infinity
+  const isChildCoordAbsToSlide = !isLooseGroup && hasBBox && (errToSlide + eps * 2) < errToChild
+
+  pushTrace(warpObj, 'group/bbox', {
+    slideNo: warpObj && warpObj.slideNo,
+    source,
+    name: groupName,
+    id: groupId,
+    order,
+    children: elements.length,
+    hasBBox,
+    bboxMinX,
+    bboxMinY,
+    bboxMaxX,
+    bboxMaxY,
+    bboxW,
+    bboxH,
+    eps,
+    isLooseGroup,
+    errToSlide,
+    errToChild,
+    isChildCoordAbsToSlide,
+  })
+
+  const baseX = isLooseGroup ? (hasBBox ? bboxMinX : 0) : (isChildCoordAbsToSlide ? x : chx)
+  const baseY = isLooseGroup ? (hasBBox ? bboxMinY : 0) : (isChildCoordAbsToSlide ? y : chy)
+  const effWs = (isLooseGroup || isChildCoordAbsToSlide) ? 1 : ws
+  const effHs = (isLooseGroup || isChildCoordAbsToSlide) ? 1 : hs
+  const outLeft = isLooseGroup ? numberToFixed(hasBBox ? bboxMinX : x) : numberToFixed(x)
+  const outTop = isLooseGroup ? numberToFixed(hasBBox ? bboxMinY : y) : numberToFixed(y)
+  const outWidth = isLooseGroup ? numberToFixed(hasBBox ? (bboxMaxX - bboxMinX) : cx) : numberToFixed(cx)
+  const outHeight = isLooseGroup ? numberToFixed(hasBBox ? (bboxMaxY - bboxMinY) : cy) : numberToFixed(cy)
+
+  pushTrace(warpObj, 'group/normalize', {
+    slideNo: warpObj && warpObj.slideNo,
+    source,
+    name: groupName,
+    id: groupId,
+    order,
+    baseX,
+    baseY,
+    effWs,
+    effHs,
+    outLeft,
+    outTop,
+    outWidth,
+    outHeight,
+  })
+
+  const normalizedChildren = elements.map(element => {
+    if (!element || typeof element.left !== 'number' || typeof element.top !== 'number') return element
+
+    const translated = {
+      ...element,
+      left: element.left - baseX,
+      top: element.top - baseY,
+    }
+
+    return scaleElementTree(translated, effWs, effHs)
+  })
+
+  sortElementsByOrder(normalizedChildren)
+
+  pushTrace(warpObj, 'group/end', {
+    slideNo: warpObj && warpObj.slideNo,
+    source,
+    name: groupName,
+    id: groupId,
+    order,
+    normalizedChildren: normalizedChildren.length,
+  })
+
   return {
     type: 'group',
-    top: numberToFixed(y),
-    left: numberToFixed(x),
-    width: numberToFixed(cx),
-    height: numberToFixed(cy),
+    top: outTop,
+    left: outLeft,
+    width: outWidth,
+    height: outHeight,
     rotate,
     order,
     isFlipV,
     isFlipH,
-    elements: elements.map(element => {
-      const next = {
-        ...element,
-        left: numberToFixed((element.left - chx) * ws),
-        top: numberToFixed((element.top - chy) * hs),
-        width: numberToFixed(element.width * ws),
-        height: numberToFixed(element.height * hs),
-      }
-
-      if (Array.isArray(next.elements)) {
-        next.elements = next.elements.map(child => scaleElementTree(child, ws, hs))
-      }
-
-      return next
-    })
+    elements: normalizedChildren,
   }
 }
 
@@ -615,19 +1399,21 @@ async function processSpNode(node, pNode, warpObj, source, groupHierarchy = []) 
 
   let slideLayoutSpNode, slideMasterSpNode
 
-  if (type) {
-    if (idx) {
-      slideLayoutSpNode = warpObj['slideLayoutTables']['typeTable'][type]
-      slideMasterSpNode = warpObj['slideMasterTables']['typeTable'][type]
-    } 
-    else {
-      slideLayoutSpNode = warpObj['slideLayoutTables']['typeTable'][type]
-      slideMasterSpNode = warpObj['slideMasterTables']['typeTable'][type]
-    }
+  const layoutTables = warpObj['slideLayoutTables']
+  const masterTables = warpObj['slideMasterTables']
+
+  if (type && idx) {
+    const k = `${type}|${idx}`
+    slideLayoutSpNode = (layoutTables && layoutTables.typeIdxTable && layoutTables.typeIdxTable[k]) || (layoutTables && layoutTables.idxTable && layoutTables.idxTable[idx]) || (layoutTables && layoutTables.typeTable && layoutTables.typeTable[type])
+    slideMasterSpNode = (masterTables && masterTables.typeIdxTable && masterTables.typeIdxTable[k]) || (masterTables && masterTables.idxTable && masterTables.idxTable[idx]) || (masterTables && masterTables.typeTable && masterTables.typeTable[type])
   }
   else if (idx) {
-    slideLayoutSpNode = warpObj['slideLayoutTables']['idxTable'][idx]
-    slideMasterSpNode = warpObj['slideMasterTables']['idxTable'][idx]
+    slideLayoutSpNode = layoutTables && layoutTables.idxTable ? layoutTables.idxTable[idx] : undefined
+    slideMasterSpNode = masterTables && masterTables.idxTable ? masterTables.idxTable[idx] : undefined
+  }
+  else if (type) {
+    slideLayoutSpNode = layoutTables && layoutTables.typeTable ? layoutTables.typeTable[type] : undefined
+    slideMasterSpNode = masterTables && masterTables.typeTable ? masterTables.typeTable[type] : undefined
   }
 
   if (!type) {
@@ -654,6 +1440,13 @@ async function processCxnSpNode(node, pNode, warpObj, source, groupHierarchy = [
 }
 
 async function genShape(node, pNode, slideLayoutSpNode, slideMasterSpNode, name, type, order, warpObj, source, groupHierarchy = []) {
+  const ph =
+    getTextByPathList(node, ['p:nvSpPr', 'p:nvPr', 'p:ph']) ||
+    getTextByPathList(node, ['p:nvPicPr', 'p:nvPr', 'p:ph']) ||
+    getTextByPathList(node, ['p:nvGraphicFramePr', 'p:nvPr', 'p:ph'])
+  const placeholderType = ph ? (getTextByPathList(ph, ['attrs', 'type']) || '') : ''
+  const placeholderIdx = ph ? (getTextByPathList(ph, ['attrs', 'idx']) || '') : ''
+
   const xfrmList = ['p:spPr', 'a:xfrm']
   const slideXfrmNode = getTextByPathList(node, xfrmList)
   const slideLayoutXfrmNode = getTextByPathList(slideLayoutSpNode, xfrmList)
@@ -684,6 +1477,14 @@ async function genShape(node, pNode, slideLayoutSpNode, slideMasterSpNode, name,
   const { borderColor, borderWidth, borderType, strokeDasharray } = getBorder(node, type, warpObj, groupHierarchy)
   const fill = await getShapeFill(node, pNode, undefined, warpObj, source, groupHierarchy) || ''
 
+  let fixedWidth = width
+  let fixedHeight = height
+  if (shapType === 'line') {
+    const minSize = Math.max(1, borderWidth || 0)
+    if (!fixedWidth) fixedWidth = minSize
+    if (!fixedHeight) fixedHeight = minSize
+  }
+
   let shadow
   const outerShdwNode = getTextByPathList(node, ['p:spPr', 'a:effectLst', 'a:outerShdw'])
   if (outerShdwNode) shadow = getShadow(outerShdwNode, warpObj)
@@ -695,8 +1496,8 @@ async function genShape(node, pNode, slideLayoutSpNode, slideMasterSpNode, name,
   const data = {
     left,
     top,
-    width,
-    height,
+    width: fixedWidth,
+    height: fixedHeight,
     borderColor,
     borderWidth,
     borderType,
@@ -709,6 +1510,8 @@ async function genShape(node, pNode, slideLayoutSpNode, slideMasterSpNode, name,
     vAlign,
     name,
     order,
+    placeholderType,
+    placeholderIdx,
   }
 
   if (shadow) data.shadow = shadow
@@ -717,9 +1520,8 @@ async function genShape(node, pNode, slideLayoutSpNode, slideMasterSpNode, name,
   const isHasValidText = data.content && hasValidText(data.content)
 
   if (custShapType && type !== 'diagram') {
-    const ext = getTextByPathList(slideXfrmNode, ['a:ext', 'attrs'])
-    const w = parseInt(ext['cx']) * RATIO_EMUs_Points
-    const h = parseInt(ext['cy']) * RATIO_EMUs_Points
+    const w = fixedWidth
+    const h = fixedHeight
     const d = getCustomShapePath(custShapType, w, h)
     if (!isHasValidText) data.content = ''
 
@@ -732,7 +1534,7 @@ async function genShape(node, pNode, slideLayoutSpNode, slideMasterSpNode, name,
   }
 
   let shapePath = ''
-  if (shapType) shapePath = getShapePath(shapType, width, height, node)
+  if (shapType) shapePath = getShapePath(shapType, fixedWidth, fixedHeight, node)
 
   if (shapType && (type === 'obj' || !type || shapType !== 'rect')) {
     if (!isHasValidText) data.content = ''
@@ -767,6 +1569,10 @@ async function processPicNode(node, warpObj, source, groupHierarchy = []) {
   else resObj = warpObj['slideResObj']
 
   const order = node['attrs']['order']
+
+  const ph = getTextByPathList(node, ['p:nvPicPr', 'p:nvPr', 'p:ph'])
+  const placeholderType = ph ? (getTextByPathList(ph, ['attrs', 'type']) || '') : ''
+  const placeholderIdx = ph ? (getTextByPathList(ph, ['attrs', 'idx']) || '') : ''
   
   const rid = node['p:blipFill']['a:blip']['attrs']['r:embed']
   const imgName = resObj[rid]['target']
@@ -837,6 +1643,8 @@ async function processPicNode(node, warpObj, source, groupHierarchy = []) {
       rotate,
       blob: videoBlob,
       order,
+      placeholderType,
+      placeholderIdx,
     }
   } 
   if (videoNode && isVdeoLink) {
@@ -849,6 +1657,8 @@ async function processPicNode(node, warpObj, source, groupHierarchy = []) {
       rotate,
       src: videoFile,
       order,
+      placeholderType,
+      placeholderIdx,
     }
   }
   if (audioNode) {
@@ -861,6 +1671,8 @@ async function processPicNode(node, warpObj, source, groupHierarchy = []) {
       rotate,
       blob: audioBlob,
       order,
+      placeholderType,
+      placeholderIdx,
     }
   }
 
@@ -896,6 +1708,8 @@ async function processPicNode(node, warpObj, source, groupHierarchy = []) {
     borderWidth,
     borderType,
     borderStrokeDasharray: strokeDasharray,
+    placeholderType,
+    placeholderIdx,
   }
 
   if (filters) imageData.filters = filters
@@ -904,6 +1718,10 @@ async function processPicNode(node, warpObj, source, groupHierarchy = []) {
 }
 
 async function processGraphicFrameNode(node, warpObj, source) {
+  const ph = getTextByPathList(node, ['p:nvGraphicFramePr', 'p:nvPr', 'p:ph'])
+  const placeholderType = ph ? (getTextByPathList(ph, ['attrs', 'type']) || '') : ''
+  const placeholderIdx = ph ? (getTextByPathList(ph, ['attrs', 'idx']) || '') : ''
+
   const graphicTypeUri = getTextByPathList(node, ['a:graphic', 'a:graphicData', 'attrs', 'uri'])
   
   let result
@@ -923,6 +1741,11 @@ async function processGraphicFrameNode(node, warpObj, source) {
       if (oleObjNode) result = await processGroupSpNode(oleObjNode, warpObj, source)
       break
     default:
+  }
+
+  if (result && (placeholderType || placeholderIdx)) {
+    result.placeholderType = placeholderType
+    result.placeholderIdx = placeholderIdx
   }
   return result
 }

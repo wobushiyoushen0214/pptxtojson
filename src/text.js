@@ -309,6 +309,34 @@ export function getSpanStyleInfo(node, pNode, textBodyNode, pFontStyle, slideLay
   if (typeof text !== 'string') text = getTextByPathList(node, ['a:fld', 'a:t'])
   if (typeof text !== 'string') text = '&nbsp;'
 
+  const fldTypeRaw = getTextByPathList(node, ['attrs', 'type']) || getTextByPathList(node, ['a:fld', 'attrs', 'type'])
+  const fldType = typeof fldTypeRaw === 'string' ? fldTypeRaw.toLowerCase() : ''
+  if (fldType === 'slidenum' && warpObj && warpObj.slideNo !== undefined && warpObj.slideNo !== null) {
+    text = String(warpObj.slideNo)
+  }
+  else if (fldType.startsWith('datetime')) {
+    const trimmed = typeof text === 'string' ? text.replace(/\s+/g, ' ').trim() : ''
+    if (!trimmed || trimmed === '日期' || trimmed.toLowerCase() === 'date') {
+      const d = new Date()
+      const yyyy = String(d.getFullYear())
+      const mm = String(d.getMonth() + 1).padStart(2, '0')
+      const dd = String(d.getDate()).padStart(2, '0')
+      text = `${yyyy}-${mm}-${dd}`
+    }
+  }
+
+  const plainTrimmed = typeof text === 'string' ? text.replace(/\s+/g, ' ').trim() : ''
+  if (type === 'sldNum' && (plainTrimmed === '<#>' || plainTrimmed === '#') && warpObj && warpObj.slideNo !== undefined && warpObj.slideNo !== null) {
+    text = String(warpObj.slideNo)
+  }
+  else if (type === 'dt' && (plainTrimmed === '日期' || plainTrimmed.toLowerCase() === 'date')) {
+    const d = new Date()
+    const yyyy = String(d.getFullYear())
+    const mm = String(d.getMonth() + 1).padStart(2, '0')
+    const dd = String(d.getDate()).padStart(2, '0')
+    text = `${yyyy}-${mm}-${dd}`
+  }
+
   let styleText = ''
   const fontColor = getFontColor(node, pNode, lstStyle, pFontStyle, lvl, warpObj)
   const fontSize = getFontSize(node, slideLayoutSpNode, type, slideMasterTextStyles, warpObj['defaultTextStyle'], textBodyNode, pNode)
