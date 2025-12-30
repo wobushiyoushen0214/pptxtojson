@@ -1,6 +1,6 @@
 {
-    "name": "hj-pptxtojson",
-    "version": "1.9.1",
+    "name": "huijia-pptxtojson",
+    "version": "1.0.0",
     "description": "A javascript tool for parsing .pptx file",
     "type": "module",
     "main": "./dist/index.umd.js",
@@ -28,7 +28,7 @@
     "author": "pipipi_pikachu@163.com",
     "repository": {
         "type": "git",
-        "url": "https://github.com/pipipi-pikachu/pptxtojson"
+        "url": "git+https://github.com/pipipi-pikachu/pptxtojson.git"
     },
     "keywords": [
         "ppt",
